@@ -21,12 +21,14 @@ from .code_utils import normalize_stock_code
 from .models import AccountSnapshot, OrderRef, OrderRequest
 
 
-RPC_REVISION = "20260715-execution-snapshot-v1"
+RPC_REVISION = "20260809-market-stream-v1"
 
 
 READ_METHODS = {
     "ping",
     "get_ticks",
+    "get_market_stream_status",
+    "drain_market_stream",
     "get_instrument",
     "get_instrument_type",
     "get_market_data",
@@ -340,6 +342,7 @@ class BigQmtRpcHandlers:
         position_provider,
         order_gateway=None,
         position_sync_sink=None,
+        market_stream=None,
         allow_order_methods=False,
         allowed_methods=None,
         qmt_api=None,
@@ -349,6 +352,7 @@ class BigQmtRpcHandlers:
         self.position_provider = position_provider
         self.order_gateway = order_gateway
         self.position_sync_sink = position_sync_sink
+        self.market_stream = market_stream
         self.allow_order_methods = bool(allow_order_methods)
         # QMT runtime-injected global functions (passorder/get_trade_detail_data/
         # 融资融券查询等)。由 strategy._build_config 解析注入。
@@ -396,13 +400,16 @@ class BigQmtRpcHandlers:
         return handler(params)
 
     def _handle_ping(self, params):
-        return {
+        result = {
             "pong": True,
             "account_id": self.account_id,
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
             "server_time": _dt.datetime.now(),
         }
+        if self.market_stream is not None:
+            result["market_stream"] = self.market_stream.status()
+        return result
 
     def _handle_get_ticks(self, params):
         codes = params.get("codes")
@@ -414,6 +421,25 @@ class BigQmtRpcHandlers:
         if not codes:
             raise ValueError("codes or code is required")
         return self.market_data.get_ticks(codes)
+
+    def _require_market_stream(self):
+        if self.market_stream is None:
+            raise RuntimeError("whole-market quote stream is disabled")
+        return self.market_stream
+
+    def _handle_get_market_stream_status(self, params):
+        return self._require_market_stream().status()
+
+    def _handle_drain_market_stream(self, params):
+        stream = self._require_market_stream()
+        expected_stream_id = str(params.get("stream_id") or "")
+        if expected_stream_id and expected_stream_id != stream.stream_id:
+            raise RuntimeError("market stream identity changed")
+        return stream.drain(
+            after_sequence=int(params.get("after_sequence") or 0),
+            max_batches=int(params.get("max_batches") or 200),
+            max_records=int(params.get("max_records") or 100000),
+        )
 
     def _handle_get_instrument(self, params):
         code = params.get("code")

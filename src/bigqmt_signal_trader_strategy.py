@@ -74,6 +74,9 @@ _LATENCY_PROBE_THRESHOLD_MS = 50.0
 _latency_probe_started = False
 _last_full_tick_refresh_at = 0.0
 _last_full_tick_market_refresh_at = 0.0
+_market_stream_buffer = None
+_market_stream_context = None
+_market_stream_subscription_id = None
 # Observed adjust cadence, so a mis-scheduled run_time (e.g. clamped to bar
 # cadence) is visible in the logs instead of silently costing latency.
 _adjust_tick_stats = {"last_ts": 0.0, "count": 0, "window_start": 0.0, "sum": 0.0, "min": 0.0, "max": 0.0}
@@ -112,6 +115,7 @@ def bind_qmt_api(passorder_func=None, cancel_func=None, get_trade_detail_data_fu
 
 def reset_app():
     global _adjust_logged, _rpc_service, _scheduled_adjust, _last_full_tick_refresh_at, _last_full_tick_market_refresh_at
+    _stop_market_stream()
     _adjust_logged = False
     _scheduled_adjust = False
     _last_full_tick_refresh_at = 0.0
@@ -321,6 +325,7 @@ def _build_rpc_service(context_info, app, config):
         ),
         order_gateway=getattr(app, "order_gateway", None),
         position_sync_sink=getattr(app, "position_sync_sink", None),
+        market_stream=_market_stream_buffer,
         allow_order_methods=allow_order_methods,
         allowed_methods=rpc_config.get("allowed_methods"),
         qmt_api=qmt_api,
@@ -375,6 +380,71 @@ def _start_rpc_service(context_info, app, config):
     if _rpc_service is not None:
         _rpc_service.start()
     return _rpc_service
+
+
+def _stop_market_stream():
+    global _market_stream_buffer, _market_stream_context, _market_stream_subscription_id
+    context_info = _market_stream_context
+    subscription_id = _market_stream_subscription_id
+    _market_stream_buffer = None
+    _market_stream_context = None
+    _market_stream_subscription_id = None
+    if context_info is None or subscription_id is None:
+        return
+    unsubscribe = getattr(context_info, "unsubscribe_quote", None)
+    if callable(unsubscribe):
+        try:
+            unsubscribe(subscription_id)
+        except Exception as exc:
+            print("[bigqmt_market_stream] unsubscribe failed: %s" % exc)
+
+
+def _start_market_stream(context_info, config):
+    global _market_stream_buffer, _market_stream_context, _market_stream_subscription_id
+    stream_config = dict(config.get("market_stream") or {})
+    if not _config_bool(stream_config.get("enabled"), False):
+        return None
+    subscribe = getattr(context_info, "subscribe_whole_quote", None)
+    if not callable(subscribe):
+        raise RuntimeError("ContextInfo.subscribe_whole_quote is unavailable")
+    markets = [
+        str(value or "").strip().upper()
+        for value in (stream_config.get("markets") or ("SH", "SZ"))
+        if str(value or "").strip()
+    ]
+    if not markets:
+        raise ValueError("market_stream markets must not be empty")
+    if _market_stream_buffer is not None:
+        _stop_market_stream()
+    if _load_bridge_module is not None:
+        module = _load_bridge_module("bigqmt_signal_trader.market_stream")
+        MarketStreamBuffer = module.MarketStreamBuffer
+    else:
+        from bigqmt_signal_trader.market_stream import MarketStreamBuffer
+
+    buffer = MarketStreamBuffer(
+        max_batches=int(stream_config.get("max_batches") or 20000),
+        max_records=int(stream_config.get("max_records") or 1000000),
+    )
+
+    def on_market_data(records):
+        try:
+            buffer.append(records, received_at_ns=int(time.time() * 1000000000))
+        except Exception as exc:
+            buffer.record_callback_error()
+            print("[bigqmt_market_stream] callback failed: %s" % exc)
+
+    subscription_id = subscribe(markets, callback=on_market_data)
+    if subscription_id is None or int(subscription_id) <= 0:
+        raise RuntimeError("whole-market quote subscription failed")
+    _market_stream_buffer = buffer
+    _market_stream_context = context_info
+    _market_stream_subscription_id = int(subscription_id)
+    print(
+        "[bigqmt_market_stream] subscribed markets=%s subscription_id=%s stream_id=%s"
+        % (",".join(markets), subscription_id, buffer.stream_id)
+    )
+    return buffer
 
 
 def _drain_rpc_service(config):
@@ -604,6 +674,7 @@ def init(ContextInfo):
     _apply_gil_tuning()
     _start_latency_probe()
     config = _build_config()
+    _start_market_stream(ContextInfo, config)
     runtime = BigQmtRuntimeAdapter(ContextInfo)
     app = init_app(runtime, _build_app)
     _start_rpc_service(ContextInfo, app, config)
@@ -634,6 +705,14 @@ def _diag_startup(ContextInfo, config):
         print("[bigqmt_diag] rpc_service=running (type=%s)" % type(_rpc_service).__name__)
     else:
         print("[bigqmt_diag] rpc_service=NOT STARTED (check enable_rpc / errors above)")
+    if _market_stream_buffer is not None:
+        stream_status = _market_stream_buffer.status()
+        print(
+            "[bigqmt_diag] market_stream=running stream_id=%s latest_sequence=%s"
+            % (stream_status["stream_id"], stream_status["latest_sequence"])
+        )
+    else:
+        print("[bigqmt_diag] market_stream=disabled")
 
     # 2. Key QMT function bindings
     qmt_api = dict(config.get("qmt_api") or {})

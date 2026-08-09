@@ -8,6 +8,8 @@
 
 - `ping`
 - `get_ticks`
+- `get_market_stream_status`
+- `drain_market_stream`
 - `get_instrument`
 - `get_market_data` / `get_market_data_ex` / `get_local_data`
 - `get_stock_list_in_sector` / `get_sector_list` / `get_sector_info`
@@ -48,14 +50,58 @@ RPC 服务端会把以下 MiniQMT 常用方法名映射到大 QMT 适配器：
 
 注意：兼容层的 `xtdata.get_full_tick(codes)` 默认走 Redis RPC 现调大 QMT。若需要降低全市场行情的大 payload 压力，可在客户端和 QMT 本地配置里显式打开 `full_tick_cache_enabled=True` / `BIGQMT_FULL_TICK_CACHE_CONFIG["enabled"]=True`，改为 Redis 需求驱动快照。
 
+## 全市场实时行情流
+
+`get_full_tick(["SH", "SZ"])` 返回调用时刻的全市场最新快照，适合启动校验和缺口诊断，不能表达两次调用之间的全部变化。连续录制使用大 QMT 原生 `ContextInfo.subscribe_whole_quote(["SH", "SZ"], callback)`：
+
+1. 策略 `init` 注册一次全推回调；策略主图周期可以保持 `1m`，无需改为 Tick。
+2. 回调收到的首批全市场快照和后续增量更新按批次写入内存缓冲区。
+3. 每次策略启动产生新的 `stream_id`，每个回调批次获得递增 `sequence`。
+4. 外部录制器通过 `drain_market_stream` 按游标读取；`gap=true`、`dropped_batches>0` 或 `stream_id` 改变时必须记录缺口，不能把该区间标记为完整 Tick 数据。
+
+开关仅配置在大 QMT 本地私有配置中：
+
+```python
+BIGQMT_REDIS_CONFIG = {
+    "market_stream_enabled": True,
+    "market_stream_markets": ("SH", "SZ"),
+    "market_stream_max_batches": 20000,
+    "market_stream_max_records": 1000000,
+}
+```
+
+状态请求：
+
+```json
+{"method": "get_market_stream_status", "params": {}}
+```
+
+游标读取：
+
+```json
+{
+  "method": "drain_market_stream",
+  "params": {
+    "stream_id": "<current-stream-id>",
+    "after_sequence": 0,
+    "max_batches": 200,
+    "max_records": 100000
+  }
+}
+```
+
+返回值包含 `earliest_sequence`、`latest_sequence`、`next_sequence`、`gap`、`has_more`、丢弃计数和原始回调 `batches`。批次是游标读取，不会因为一次读取立即从缓冲区删除；缓冲区达到上限时淘汰最早批次并累计丢弃计数。
+
 ## 实现文件
 
 - `src/bigqmt_signal_trader/redis_rpc.py`：RPC 协议、Redis queue 服务、外部客户端 helper。
+- `src/bigqmt_signal_trader/market_stream.py`：全市场回调的有界顺序缓冲区和缺口元数据。
 - `src/bigqmt_signal_trader/xtquant_compat.py`：MiniQMT 风格客户端兼容层。
 - `src/xtquant/`：可选的 `xtquant` import shim，用于最终替换老 import。
 - `src/bigqmt_signal_trader_strategy.py`：在 `init` 中启动 RPC；默认由 QMT `run_time("adjust", ...)` drain Redis queue，避免大 QMT 冻结自建后台线程。
 - `src/bigqmt_signal_trader_redis_rpc_runtime.py`：大 QMT 策略入口，默认不消费交易信号，只启用 RPC 和持仓同步。
 - `tests/bigqmt_signal_trader/test_redis_rpc.py`：RPC 单测。
+- `tests/bigqmt_signal_trader/test_market_stream.py`：全市场回调缓冲区和游标 RPC 单测。
 
 ## 运行方式
 
@@ -102,6 +148,10 @@ BIGQMT_REDIS_CONFIG = {
     "full_tick_cache_ttl_seconds": 10,
     "full_tick_refresh_interval_seconds": 3,
     "full_tick_max_requests": 8,
+    "market_stream_enabled": True,
+    "market_stream_markets": ("SH", "SZ"),
+    "market_stream_max_batches": 20000,
+    "market_stream_max_records": 1000000,
 }
 ```
 

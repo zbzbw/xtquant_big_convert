@@ -49,6 +49,22 @@ class FakeHistoryContext(FakeContext):
         return False
 
 
+class FakeMarketStreamContext(FakeContext):
+    def __init__(self):
+        super().__init__()
+        self.subscription_markets = []
+        self.market_callback = None
+        self.unsubscribed = []
+
+    def subscribe_whole_quote(self, markets, callback):
+        self.subscription_markets.append(list(markets))
+        self.market_callback = callback
+        return 7
+
+    def unsubscribe_quote(self, subscription_id):
+        self.unsubscribed.append(subscription_id)
+
+
 class FakeRpcService:
     def __init__(self):
         self.drained = []
@@ -163,6 +179,38 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
 
         self.assertEqual(print_mock.call_count, 1)
         self.assertIn("WARNING adjust cadence stalled", print_mock.call_args[0][0])
+
+    def test_market_stream_bridges_whole_quote_callback(self):
+        context = FakeMarketStreamContext()
+
+        stream = strategy_module._start_market_stream(
+            context,
+            {
+                "market_stream": {
+                    "enabled": True,
+                    "markets": ("SH", "SZ"),
+                    "max_batches": 10,
+                    "max_records": 100,
+                }
+            },
+        )
+        context.market_callback({"600000.SH": {"time": 1}})
+        result = stream.drain(after_sequence=0)
+
+        self.assertEqual(context.subscription_markets, [["SH", "SZ"]])
+        self.assertEqual(result["next_sequence"], 1)
+        self.assertEqual(result["batches"][0]["records"]["600000.SH"]["time"], 1)
+
+        strategy_module.reset_app()
+
+        self.assertEqual(context.unsubscribed, [7])
+
+    def test_market_stream_requires_native_whole_quote_api(self):
+        with self.assertRaisesRegex(RuntimeError, "subscribe_whole_quote"):
+            strategy_module._start_market_stream(
+                FakeContext(),
+                {"market_stream": {"enabled": True}},
+            )
 
     def test_zmq_rpc_build_does_not_create_redis_clients(self):
         config = {

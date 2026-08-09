@@ -40,6 +40,12 @@ BIGQMT_REDIS_CONFIG = {
     # strategy thread (the in-flight demand always completes).
     "full_tick_refresh_max_wall_seconds": 0.3,
     "full_tick_max_requests": 8,
+    # Bridge ContextInfo.subscribe_whole_quote incremental callbacks into an
+    # ordered, gap-detectable RPC buffer for an external market recorder.
+    "market_stream_enabled": False,
+    "market_stream_markets": ("SH", "SZ"),
+    "market_stream_max_batches": 20000,
+    "market_stream_max_records": 1000000,
     # Async download jobs: clients submit download_history_data(2) as a job; the
     # strategy thread downloads download_job_chunk_size symbols per tick (capped by
     # download_job_max_wall_seconds), so a long download never blocks the RPC pump.
