@@ -67,6 +67,45 @@ class MarketStreamBufferTests(unittest.TestCase):
         self.assertTrue(first["has_more"])
         self.assertEqual(second["next_sequence"], 2)
 
+    def test_large_callback_is_chunked_without_losing_bootstrap_identity(self):
+        stream = MarketStreamBuffer(
+            max_batches=10,
+            max_records=10,
+            batch_max_records=2,
+        )
+
+        latest = stream.append(
+            {
+                "600000.SH": {"time": 1},
+                "600001.SH": {"time": 1},
+                "600002.SH": {"time": 1},
+                "600003.SH": {"time": 1},
+                "600004.SH": {"time": 1},
+            },
+            received_at_ns=10,
+            is_bootstrap=True,
+        )
+        first = stream.drain(after_sequence=0, max_records=2)
+        second = stream.drain(after_sequence=first["next_sequence"], max_records=2)
+        third = stream.drain(after_sequence=second["next_sequence"], max_records=2)
+
+        self.assertEqual(latest, 3)
+        self.assertEqual(first["schema_version"], 2)
+        self.assertEqual(first["batch_max_records"], 2)
+        self.assertEqual(first["latest_callback_sequence"], 1)
+        self.assertEqual(first["returned_records"], 2)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(second["returned_records"], 2)
+        self.assertEqual(third["returned_records"], 1)
+        batches = first["batches"] + second["batches"] + third["batches"]
+        self.assertEqual([batch["sequence"] for batch in batches], [1, 2, 3])
+        self.assertEqual(
+            [batch["callback_sequence"] for batch in batches],
+            [1, 1, 1],
+        )
+        self.assertEqual([batch["callback_part"] for batch in batches], [1, 2, 3])
+        self.assertTrue(all(batch["is_bootstrap"] for batch in batches))
+
 
 class MarketStreamRpcTests(unittest.TestCase):
     def test_rpc_exposes_status_and_cursor_drain(self):

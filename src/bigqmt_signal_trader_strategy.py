@@ -425,11 +425,49 @@ def _start_market_stream(context_info, config):
     buffer = MarketStreamBuffer(
         max_batches=int(stream_config.get("max_batches") or 20000),
         max_records=int(stream_config.get("max_records") or 1000000),
+        batch_max_records=int(
+            stream_config.get("batch_max_records") or 1000
+        ),
     )
+    pending_bootstrap_markets = set(markets)
+    callback_lock = threading.Lock()
+
+    def market_for_code(code):
+        text = str(code or "").strip().upper()
+        for market in markets:
+            if text.endswith("." + market) or text.startswith(market + "."):
+                return market
+        return None
 
     def on_market_data(records):
         try:
-            buffer.append(records, received_at_ns=int(time.time() * 1000000000))
+            received_at_ns = int(time.time() * 1000000000)
+            with callback_lock:
+                bootstrap_records = {}
+                incremental_records = {}
+                observed_bootstrap_markets = set()
+                for code, value in records.items():
+                    market = market_for_code(code)
+                    if market in pending_bootstrap_markets:
+                        bootstrap_records[code] = value
+                        observed_bootstrap_markets.add(market)
+                    else:
+                        incremental_records[code] = value
+                pending_bootstrap_markets.difference_update(
+                    observed_bootstrap_markets
+                )
+                if bootstrap_records:
+                    buffer.append(
+                        bootstrap_records,
+                        received_at_ns=received_at_ns,
+                        is_bootstrap=True,
+                    )
+                if incremental_records:
+                    buffer.append(
+                        incremental_records,
+                        received_at_ns=received_at_ns,
+                        is_bootstrap=False,
+                    )
         except Exception as exc:
             buffer.record_callback_error()
             print("[bigqmt_market_stream] callback failed: %s" % exc)
@@ -441,8 +479,13 @@ def _start_market_stream(context_info, config):
     _market_stream_context = context_info
     _market_stream_subscription_id = int(subscription_id)
     print(
-        "[bigqmt_market_stream] subscribed markets=%s subscription_id=%s stream_id=%s"
-        % (",".join(markets), subscription_id, buffer.stream_id)
+        "[bigqmt_market_stream] subscribed markets=%s subscription_id=%s stream_id=%s batch_max_records=%s"
+        % (
+            ",".join(markets),
+            subscription_id,
+            buffer.stream_id,
+            buffer.batch_max_records,
+        )
     )
     return buffer
 

@@ -46,6 +46,7 @@ BIGQMT_REDIS_CONFIG = {
     "market_stream_markets": ("SH", "SZ"),
     "market_stream_max_batches": 20000,
     "market_stream_max_records": 1000000,
+    "market_stream_batch_max_records": 1000,
     # Async download jobs: clients submit download_history_data(2) as a job; the
     # strategy thread downloads download_job_chunk_size symbols per tick (capped by
     # download_job_max_wall_seconds), so a long download never blocks the RPC pump.

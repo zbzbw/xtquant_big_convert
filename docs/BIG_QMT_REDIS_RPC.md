@@ -55,8 +55,8 @@ RPC 服务端会把以下 MiniQMT 常用方法名映射到大 QMT 适配器：
 `get_full_tick(["SH", "SZ"])` 返回调用时刻的全市场最新快照，适合启动校验和缺口诊断，不能表达两次调用之间的全部变化。连续录制使用大 QMT 原生 `ContextInfo.subscribe_whole_quote(["SH", "SZ"], callback)`：
 
 1. 策略 `init` 注册一次全推回调；策略主图周期可以保持 `1m`，无需改为 Tick。
-2. 回调收到的首批全市场快照和后续增量更新按批次写入内存缓冲区。
-3. 每次策略启动产生新的 `stream_id`，每个回调批次获得递增 `sequence`。
+2. SH、SZ 各自首次出现的全量回调标记为 bootstrap；后续回调标记为增量更新。
+3. 每次策略启动产生新的 `stream_id`。原生 callback 获得 `callback_sequence`，并切成最多 `market_stream_batch_max_records` 条的有序 chunk；每个 chunk 获得递增 `sequence`，同时保留分片序号和 bootstrap 标记。
 4. 外部录制器通过 `drain_market_stream` 按游标读取；`gap=true`、`dropped_batches>0` 或 `stream_id` 改变时必须记录缺口，不能把该区间标记为完整 Tick 数据。
 
 开关仅配置在大 QMT 本地私有配置中：
@@ -67,6 +67,7 @@ BIGQMT_REDIS_CONFIG = {
     "market_stream_markets": ("SH", "SZ"),
     "market_stream_max_batches": 20000,
     "market_stream_max_records": 1000000,
+    "market_stream_batch_max_records": 1000,
 }
 ```
 
@@ -85,12 +86,12 @@ BIGQMT_REDIS_CONFIG = {
     "stream_id": "<current-stream-id>",
     "after_sequence": 0,
     "max_batches": 200,
-    "max_records": 100000
+    "max_records": 1000
   }
 }
 ```
 
-返回值包含 `earliest_sequence`、`latest_sequence`、`next_sequence`、`gap`、`has_more`、丢弃计数和原始回调 `batches`。批次是游标读取，不会因为一次读取立即从缓冲区删除；缓冲区达到上限时淘汰最早批次并累计丢弃计数。
+返回值包含 `earliest_sequence`、`latest_sequence`、`next_sequence`、`gap`、`has_more`、丢弃计数和回调 chunk `batches`。每个 chunk 包含 `callback_sequence`、`callback_part`、`callback_parts` 和 `is_bootstrap`。批次是游标读取，不会因为一次读取立即从缓冲区删除；缓冲区达到上限时淘汰最早批次并累计丢弃计数。
 
 ## 实现文件
 
@@ -152,6 +153,7 @@ BIGQMT_REDIS_CONFIG = {
     "market_stream_markets": ("SH", "SZ"),
     "market_stream_max_batches": 20000,
     "market_stream_max_records": 1000000,
+    "market_stream_batch_max_records": 1000,
 }
 ```
 

@@ -191,15 +191,32 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
                     "markets": ("SH", "SZ"),
                     "max_batches": 10,
                     "max_records": 100,
+                    "batch_max_records": 2,
                 }
             },
         )
-        context.market_callback({"600000.SH": {"time": 1}})
+        context.market_callback(
+            {
+                "600000.SH": {"time": 1},
+                "600001.SH": {"time": 1},
+                "600002.SH": {"time": 1},
+            }
+        )
+        context.market_callback({"000001.SZ": {"time": 1}})
+        context.market_callback({"600000.SH": {"time": 2}})
         result = stream.drain(after_sequence=0)
 
         self.assertEqual(context.subscription_markets, [["SH", "SZ"]])
-        self.assertEqual(result["next_sequence"], 1)
+        self.assertEqual(result["next_sequence"], 4)
         self.assertEqual(result["batches"][0]["records"]["600000.SH"]["time"], 1)
+        self.assertEqual(
+            [batch["is_bootstrap"] for batch in result["batches"]],
+            [True, True, True, False],
+        )
+        self.assertEqual(
+            [batch["callback_sequence"] for batch in result["batches"]],
+            [1, 1, 2, 3],
+        )
 
         strategy_module.reset_app()
 
