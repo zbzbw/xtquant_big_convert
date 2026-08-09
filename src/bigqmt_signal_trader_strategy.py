@@ -487,9 +487,24 @@ def _schedule_adjust_if_needed(context_info, config):
         )
 
 
-def _record_adjust_tick():
+def _positive_float(value, default):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return result if result > 0 else float(default)
+
+
+def _record_adjust_tick(config=None):
     """Track and periodically log the real interval between adjust triggers."""
     stats = _adjust_tick_stats
+    cadence_config = dict((config or {}).get("adjust_cadence") or {})
+    window_seconds = _positive_float(cadence_config.get("window_seconds"), 10.0)
+    warn_threshold = _positive_float(
+        cadence_config.get("warn_threshold_seconds"),
+        1.0,
+    )
+    log_normal = _config_bool(cadence_config.get("log_normal"), True)
     now = time.time()
     last = stats["last_ts"]
     stats["last_ts"] = now
@@ -501,12 +516,33 @@ def _record_adjust_tick():
     stats["sum"] += delta
     stats["min"] = delta if stats["min"] <= 0 else min(stats["min"], delta)
     stats["max"] = max(stats["max"], delta)
-    if now - stats["window_start"] >= 10.0 and stats["count"] > 0:
+    if now - stats["window_start"] >= window_seconds and stats["count"] > 0:
         avg = stats["sum"] / stats["count"]
-        print(
-            "[bigqmt_signal_trader] adjust cadence: ticks=%d avg=%.3fs min=%.3fs max=%.3fs over %.0fs"
-            % (stats["count"], avg, stats["min"], stats["max"], now - stats["window_start"])
-        )
+        if stats["max"] >= warn_threshold:
+            print(
+                "[bigqmt_signal_trader] WARNING adjust cadence stalled: "
+                "ticks=%d avg=%.3fs min=%.3fs max=%.3fs over %.0fs threshold=%.3fs"
+                % (
+                    stats["count"],
+                    avg,
+                    stats["min"],
+                    stats["max"],
+                    now - stats["window_start"],
+                    warn_threshold,
+                )
+            )
+        elif log_normal:
+            print(
+                "[bigqmt_signal_trader] adjust cadence: "
+                "ticks=%d avg=%.3fs min=%.3fs max=%.3fs over %.0fs"
+                % (
+                    stats["count"],
+                    avg,
+                    stats["min"],
+                    stats["max"],
+                    now - stats["window_start"],
+                )
+            )
         stats.update({"count": 0, "sum": 0.0, "min": 0.0, "max": 0.0, "window_start": now})
 
 
@@ -671,8 +707,8 @@ def _adjust_phase(name, fn, *args):
 
 def adjust(ContextInfo):
     global _adjust_logged
-    _record_adjust_tick()
     config = _build_config()
+    _record_adjust_tick(config)
     _adjust_phase("drain", _drain_rpc_service, config)
     _adjust_phase("full_tick", _refresh_full_tick_cache, ContextInfo, config)
     _adjust_phase("download", _pump_download_jobs, ContextInfo, config)

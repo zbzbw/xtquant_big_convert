@@ -125,6 +125,45 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
         self.assertEqual(rpc_service.drained, [20])
         self.assertEqual(self.app.ticks, [])
 
+    def test_adjust_cadence_can_suppress_normal_summary(self):
+        config = {
+            "adjust_cadence": {
+                "log_normal": False,
+                "window_seconds": 1.0,
+                "warn_threshold_seconds": 2.0,
+            }
+        }
+        with mock.patch.object(
+            strategy_module.time,
+            "time",
+            side_effect=(100.0, 100.1, 101.1),
+        ):
+            with mock.patch("builtins.print") as print_mock:
+                for _ in range(3):
+                    strategy_module._record_adjust_tick(config)
+
+        print_mock.assert_not_called()
+
+    def test_adjust_cadence_preserves_stall_warning(self):
+        config = {
+            "adjust_cadence": {
+                "log_normal": False,
+                "window_seconds": 1.0,
+                "warn_threshold_seconds": 0.5,
+            }
+        }
+        with mock.patch.object(
+            strategy_module.time,
+            "time",
+            side_effect=(100.0, 100.1, 101.1),
+        ):
+            with mock.patch("builtins.print") as print_mock:
+                for _ in range(3):
+                    strategy_module._record_adjust_tick(config)
+
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertIn("WARNING adjust cadence stalled", print_mock.call_args[0][0])
+
     def test_zmq_rpc_build_does_not_create_redis_clients(self):
         config = {
             "account_id": "acct",
