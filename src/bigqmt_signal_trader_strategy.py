@@ -77,6 +77,11 @@ _last_full_tick_market_refresh_at = 0.0
 _market_stream_buffer = None
 _market_stream_context = None
 _market_stream_subscription_id = None
+_MARKET_STREAM_SECTOR_ALIASES = {
+    "cn_a_share": "\u6caa\u6df1A\u80a1",
+    "cn_etf": "\u6caa\u6df1ETF",
+    "cn_index": "\u6caa\u6df1\u6307\u6570",
+}
 # Observed adjust cadence, so a mis-scheduled run_time (e.g. clamped to bar
 # cadence) is visible in the logs instead of silently costing latency.
 _adjust_tick_stats = {"last_ts": 0.0, "count": 0, "window_start": 0.0, "sum": 0.0, "min": 0.0, "max": 0.0}
@@ -414,6 +419,57 @@ def _start_market_stream(context_info, config):
     ]
     if not markets:
         raise ValueError("market_stream markets must not be empty")
+
+    def market_for_code(code):
+        text = str(code or "").strip().upper()
+        for market in markets:
+            if text.endswith("." + market) or text.startswith(market + "."):
+                return market
+        return None
+
+    sector_keys = [
+        str(value or "").strip()
+        for value in (stream_config.get("sectors") or ())
+        if str(value or "").strip()
+    ]
+    universe = None
+    sector_counts = {}
+    if sector_keys:
+        get_sector = getattr(context_info, "get_stock_list_in_sector", None)
+        if not callable(get_sector):
+            raise RuntimeError("ContextInfo.get_stock_list_in_sector is unavailable")
+        resolved_universe = set()
+        for sector_key in sector_keys:
+            sector_name = _MARKET_STREAM_SECTOR_ALIASES.get(
+                sector_key,
+                sector_key,
+            )
+            try:
+                values = get_sector(sector_name, -1)
+            except TypeError:
+                values = get_sector(sector_name)
+            normalized = {
+                str(code or "").strip().upper()
+                for code in (values or ())
+                if market_for_code(code) is not None
+            }
+            if not normalized:
+                raise RuntimeError(
+                    "market stream sector is empty: %s" % sector_key
+                )
+            sector_counts[sector_key] = len(normalized)
+            resolved_universe.update(normalized)
+        missing_markets = [
+            market
+            for market in markets
+            if not any(market_for_code(code) == market for code in resolved_universe)
+        ]
+        if missing_markets:
+            raise RuntimeError(
+                "market stream universe has no codes for markets: %s"
+                % ",".join(missing_markets)
+            )
+        universe = frozenset(resolved_universe)
     if _market_stream_buffer is not None:
         _stop_market_stream()
     if _load_bridge_module is not None:
@@ -428,16 +484,10 @@ def _start_market_stream(context_info, config):
         batch_max_records=int(
             stream_config.get("batch_max_records") or 1000
         ),
+        universe_size=0 if universe is None else len(universe),
     )
     pending_bootstrap_markets = set(markets)
     callback_lock = threading.Lock()
-
-    def market_for_code(code):
-        text = str(code or "").strip().upper()
-        for market in markets:
-            if text.endswith("." + market) or text.startswith(market + "."):
-                return market
-        return None
 
     def on_market_data(records):
         try:
@@ -446,13 +496,20 @@ def _start_market_stream(context_info, config):
                 bootstrap_records = {}
                 incremental_records = {}
                 observed_bootstrap_markets = set()
+                filtered_records = 0
                 for code, value in records.items():
-                    market = market_for_code(code)
+                    normalized_code = str(code or "").strip().upper()
+                    if universe is not None and normalized_code not in universe:
+                        filtered_records += 1
+                        continue
+                    market = market_for_code(normalized_code)
                     if market in pending_bootstrap_markets:
-                        bootstrap_records[code] = value
+                        bootstrap_records[normalized_code] = value
                         observed_bootstrap_markets.add(market)
                     else:
-                        incremental_records[code] = value
+                        incremental_records[normalized_code] = value
+                if filtered_records:
+                    buffer.record_filtered_records(filtered_records)
                 pending_bootstrap_markets.difference_update(
                     observed_bootstrap_markets
                 )
@@ -479,9 +536,12 @@ def _start_market_stream(context_info, config):
     _market_stream_context = context_info
     _market_stream_subscription_id = int(subscription_id)
     print(
-        "[bigqmt_market_stream] subscribed markets=%s subscription_id=%s stream_id=%s batch_max_records=%s"
+        "[bigqmt_market_stream] subscribed markets=%s sectors=%s sector_counts=%s universe_size=%s subscription_id=%s stream_id=%s batch_max_records=%s"
         % (
             ",".join(markets),
+            ",".join(sector_keys) or "all",
+            sector_counts,
+            0 if universe is None else len(universe),
             subscription_id,
             buffer.stream_id,
             buffer.batch_max_records,

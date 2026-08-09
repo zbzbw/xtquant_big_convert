@@ -22,6 +22,7 @@ class MarketStreamBuffer:
         max_batches=20000,
         max_records=1000000,
         batch_max_records=None,
+        universe_size=0,
     ):
         if isinstance(max_batches, bool) or int(max_batches) <= 0:
             raise ValueError("max_batches must be positive")
@@ -39,9 +40,12 @@ class MarketStreamBuffer:
             raise ValueError("batch_max_records must be positive")
         if int(resolved_batch_max_records) > int(max_records):
             raise ValueError("batch_max_records must not exceed max_records")
+        if isinstance(universe_size, bool) or int(universe_size) < 0:
+            raise ValueError("universe_size must not be negative")
         self.max_batches = int(max_batches)
         self.max_records = int(max_records)
         self.batch_max_records = int(resolved_batch_max_records)
+        self.universe_size = int(universe_size)
         self.stream_id = uuid.uuid4().hex
         self.started_at_ns = _wall_time_ns()
         self._lock = threading.RLock()
@@ -52,6 +56,7 @@ class MarketStreamBuffer:
         self._dropped_batches = 0
         self._dropped_records = 0
         self._callback_errors = 0
+        self._filtered_records = 0
 
     def append(self, records, received_at_ns=None, is_bootstrap=False):
         if not isinstance(records, dict):
@@ -104,6 +109,13 @@ class MarketStreamBuffer:
         with self._lock:
             self._callback_errors += 1
 
+    def record_filtered_records(self, count):
+        resolved = int(count)
+        if isinstance(count, bool) or resolved < 0:
+            raise ValueError("filtered record count must not be negative")
+        with self._lock:
+            self._filtered_records += resolved
+
     def status(self):
         with self._lock:
             earliest = (
@@ -123,6 +135,8 @@ class MarketStreamBuffer:
                 "dropped_batches": self._dropped_batches,
                 "dropped_records": self._dropped_records,
                 "callback_errors": self._callback_errors,
+                "universe_size": self.universe_size,
+                "filtered_records": self._filtered_records,
                 "max_batches": self.max_batches,
                 "max_records": self.max_records,
                 "batch_max_records": self.batch_max_records,

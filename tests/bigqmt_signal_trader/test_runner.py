@@ -55,6 +55,7 @@ class FakeMarketStreamContext(FakeContext):
         self.subscription_markets = []
         self.market_callback = None
         self.unsubscribed = []
+        self.sector_requests = []
 
     def subscribe_whole_quote(self, markets, callback):
         self.subscription_markets.append(list(markets))
@@ -63,6 +64,15 @@ class FakeMarketStreamContext(FakeContext):
 
     def unsubscribe_quote(self, subscription_id):
         self.unsubscribed.append(subscription_id)
+
+    def get_stock_list_in_sector(self, sector_name, real_timetag=-1):
+        self.sector_requests.append((sector_name, real_timetag))
+        values = {
+            "\u6caa\u6df1A\u80a1": ["600000.SH", "000001.SZ"],
+            "\u6caa\u6df1ETF": ["510050.SH"],
+            "\u6caa\u6df1\u6307\u6570": ["000001.SH"],
+        }
+        return values.get(sector_name, [])
 
 
 class FakeRpcService:
@@ -228,6 +238,46 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
                 FakeContext(),
                 {"market_stream": {"enabled": True}},
             )
+
+    def test_market_stream_filters_callbacks_to_configured_sectors(self):
+        context = FakeMarketStreamContext()
+
+        stream = strategy_module._start_market_stream(
+            context,
+            {
+                "market_stream": {
+                    "enabled": True,
+                    "markets": ("SH", "SZ"),
+                    "sectors": ("cn_a_share", "cn_etf", "cn_index"),
+                    "max_batches": 10,
+                    "max_records": 100,
+                    "batch_max_records": 10,
+                }
+            },
+        )
+        context.market_callback(
+            {
+                "600000.SH": {"time": 1},
+                "000001.SZ": {"time": 1},
+                "510050.SH": {"time": 1},
+                "000001.SH": {"time": 1},
+                "204001.SH": {"time": 1},
+            }
+        )
+
+        result = stream.drain(after_sequence=0)
+        records = {
+            code
+            for batch in result["batches"]
+            for code in batch["records"]
+        }
+
+        self.assertEqual(
+            records,
+            {"600000.SH", "000001.SZ", "510050.SH", "000001.SH"},
+        )
+        self.assertEqual(result["universe_size"], 4)
+        self.assertEqual(result["filtered_records"], 1)
 
     def test_zmq_rpc_build_does_not_create_redis_clients(self):
         config = {

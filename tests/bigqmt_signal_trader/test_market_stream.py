@@ -11,6 +11,15 @@ class _UnusedProvider:
 
 
 class MarketStreamBufferTests(unittest.TestCase):
+    def test_status_exposes_universe_and_filtered_record_counts(self):
+        stream = MarketStreamBuffer(universe_size=3)
+        stream.record_filtered_records(4)
+
+        status = stream.status()
+
+        self.assertEqual(status["universe_size"], 3)
+        self.assertEqual(status["filtered_records"], 4)
+
     def test_drain_preserves_callback_batch_order(self):
         stream = MarketStreamBuffer(max_batches=4, max_records=10)
         stream.append({"600000.SH": {"time": 1}}, received_at_ns=10)
