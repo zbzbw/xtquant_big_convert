@@ -101,6 +101,12 @@ ORDER_METHODS = {
 }
 
 LISTENER_DEFERRED_METHODS = {
+    # Large stream responses are expensive to normalize and encode. QMT gives
+    # its background Python thread too little runtime for that work, producing
+    # multi-second stalls despite low process CPU. The scheduled strategy
+    # thread runs every 100ms and completes the same work without starvation.
+    "get_market_stream_status",
+    "drain_market_stream",
     "sync_positions",
     # Trade-context queries route through QMT's get_trade_detail_data, which
     # returns EMPTY when called from the background RPC thread (it needs the main

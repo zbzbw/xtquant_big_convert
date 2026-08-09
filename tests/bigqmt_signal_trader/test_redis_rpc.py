@@ -510,6 +510,23 @@ class RedisRpcTest(unittest.TestCase):
         response = json.loads(redis_client.kv["bigqmt:rpc:resp:acct:queued-asset"])
         self.assertTrue(response["ok"], response["error"])
 
+    def test_listener_wildcard_defers_market_stream_reads(self):
+        _redis_client, service = _service_with_listener_methods(
+            process_in_listener=True,
+            listener_methods=("*",),
+        )
+
+        self.assertFalse(
+            service._should_process_in_listener(
+                {"method": "get_market_stream_status"}
+            )
+        )
+        self.assertFalse(
+            service._should_process_in_listener(
+                {"method": "drain_market_stream"}
+            )
+        )
+
     def test_account_mismatch_is_rejected(self):
         redis_client, service = _service()
 
