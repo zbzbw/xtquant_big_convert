@@ -150,6 +150,32 @@ class ZmqTransportTest(unittest.TestCase):
         s.close()
         self.address = "tcp://127.0.0.1:%d" % self.port
 
+    def test_binary_response_codec_round_trip(self):
+        from bigqmt_signal_trader.transports.zmq_transport import (
+            BINARY_JSON_ZLIB_PREFIX,
+            _encode_response,
+            _loads,
+        )
+
+        response = {"request_id": "req-1", "data": {"payload": "x" * 5000}}
+        encoded = _encode_response(response, binary_threshold_bytes=100)
+
+        self.assertTrue(encoded.startswith(BINARY_JSON_ZLIB_PREFIX))
+        self.assertEqual(_loads(encoded), response)
+
+    def test_small_response_keeps_legacy_wire_encoding(self):
+        from bigqmt_signal_trader.transports.zmq_transport import (
+            BINARY_JSON_ZLIB_PREFIX,
+            _encode_response,
+            _loads,
+        )
+
+        response = {"request_id": "req-1", "data": {"pong": True}}
+        encoded = _encode_response(response, binary_threshold_bytes=10000)
+
+        self.assertFalse(encoded.startswith(BINARY_JSON_ZLIB_PREFIX))
+        self.assertEqual(_loads(encoded), response)
+
     def test_round_trip(self):
         from bigqmt_signal_trader.transports.zmq_transport import ZmqTransport
 

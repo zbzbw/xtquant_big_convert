@@ -76,6 +76,28 @@ class MarketStreamBufferTests(unittest.TestCase):
         self.assertTrue(first["has_more"])
         self.assertEqual(second["next_sequence"], 2)
 
+    def test_default_drain_isolated_from_buffer_mutation(self):
+        stream = MarketStreamBuffer(max_batches=4, max_records=10)
+        stream.append({"600000.SH": {"time": 1}})
+
+        result = stream.drain(after_sequence=0)
+        result["batches"][0]["records"]["600000.SH"]["time"] = 2
+
+        self.assertEqual(
+            stream.drain(after_sequence=0)["batches"][0]["records"]
+            ["600000.SH"]["time"],
+            1,
+        )
+
+    def test_zero_copy_drain_reuses_frozen_internal_batch(self):
+        stream = MarketStreamBuffer(max_batches=4, max_records=10)
+        stream.append({"600000.SH": {"time": 1}})
+
+        first = stream.drain(after_sequence=0, copy_batches=False)
+        second = stream.drain(after_sequence=0, copy_batches=False)
+
+        self.assertIs(first["batches"][0], second["batches"][0])
+
     def test_large_callback_is_chunked_without_losing_bootstrap_identity(self):
         stream = MarketStreamBuffer(
             max_batches=10,

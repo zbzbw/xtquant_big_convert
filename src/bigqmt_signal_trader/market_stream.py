@@ -142,7 +142,13 @@ class MarketStreamBuffer:
                 "batch_max_records": self.batch_max_records,
             }
 
-    def drain(self, after_sequence=0, max_batches=200, max_records=100000):
+    def drain(
+        self,
+        after_sequence=0,
+        max_batches=200,
+        max_records=100000,
+        copy_batches=True,
+    ):
         after = int(after_sequence or 0)
         batch_limit = int(max_batches)
         record_limit = int(max_records)
@@ -168,7 +174,7 @@ class MarketStreamBuffer:
                     or selected_records + batch_records > record_limit
                 ):
                     break
-                selected.append(copy.deepcopy(batch))
+                selected.append(copy.deepcopy(batch) if copy_batches else batch)
                 selected_records += batch_records
                 if len(selected) >= batch_limit:
                     break

@@ -24,6 +24,11 @@ from .models import AccountSnapshot, OrderRef, OrderRequest
 RPC_REVISION = "20260809-market-stream-v2"
 
 
+JSON_READY_METHODS = {
+    "drain_market_stream",
+}
+
+
 READ_METHODS = {
     "ping",
     "get_ticks",
@@ -445,6 +450,7 @@ class BigQmtRpcHandlers:
             after_sequence=int(params.get("after_sequence") or 0),
             max_batches=int(params.get("max_batches") or 200),
             max_records=int(params.get("max_records") or 100000),
+            copy_batches=False,
         )
 
     def _handle_get_instrument(self, params):
@@ -1179,7 +1185,16 @@ class RedisPubSubRpcService:
             if self.account_id and account_id and account_id != self.account_id:
                 raise PermissionError("account_id mismatch")
             result = self.handlers.handle(method, request.get("params") or {})
-            response["data"] = to_jsonable(result)
+            canonical_method = getattr(
+                self.handlers,
+                "_canonical_method",
+                lambda value: value,
+            )(method)
+            response["data"] = (
+                result
+                if canonical_method in JSON_READY_METHODS
+                else to_jsonable(result)
+            )
             response["ok"] = True
             # Surface server-side diagnostics when the handler recorded one.
             server_error = getattr(self.handlers, "_last_server_error", None)
