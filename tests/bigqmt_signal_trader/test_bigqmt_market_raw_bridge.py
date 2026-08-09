@@ -23,6 +23,7 @@ class RawMarketContext:
         end_time="",
         count=-1,
         dividend_type="none",
+        subscribe=True,
     ):
         self.calls.append(
             {
@@ -33,6 +34,7 @@ class RawMarketContext:
                 "end_time": end_time,
                 "count": count,
                 "dividend_type": dividend_type,
+                "subscribe": subscribe,
             }
         )
         return self.payload
@@ -67,6 +69,19 @@ class BigQmtRawMarketBridgeTest(unittest.TestCase):
 
         self.assertEqual([], data["600276.SH"]["records"])
         self.assertEqual(["stime", "close"], data["600276.SH"]["columns"])
+
+    def test_market_data_ex_can_read_only_downloaded_local_data(self):
+        context = RawMarketContext({})
+        provider = BigQmtMarketDataProvider(context)
+
+        provider.get_market_data_ex(
+            field_list=["close"],
+            stock_list=["600276.SH"],
+            period="1m",
+            subscribe=False,
+        )
+
+        self.assertIs(False, context.calls[0]["subscribe"])
 
 
 if __name__ == "__main__":
