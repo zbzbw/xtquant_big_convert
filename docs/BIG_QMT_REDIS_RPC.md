@@ -24,7 +24,26 @@
 - `query_trades`
 - `sync_positions`
 
-下单类方法 `submit_order`、`cancel_order` 默认关闭，只有显式配置 `rpc_allow_order_methods=True` 后才会开放。
+下单、批量下单、撤单默认关闭；启用 `rpc_allow_order_methods=True` 后仍必须通过下面的节点账户校验，live 一律拒绝。
+
+## 节点账户事实（ZBW-72）
+
+`ping.account_environment` 为 `broker_sim`、`live` 或 JSON `null`（unknown）。环境来自节点操作者核验目标 QMT/柜台后的绑定，并在运行时与独立会话事实核对；这不是 SDK 自动识别模拟环境。
+
+在服务端私有 `BIGQMT_REDIS_CONFIG` 提供以下输入，runtime 经现有 `configure` / strategy 装配传入 handler：
+
+| 输入 | 契约 |
+|---|---|
+| `node_account_binding` | `{account_id: <已核验账号>, account_environment: "broker_sim" 或 "live"}`；handler 复制绑定，默认 `None` |
+| `session_facts_reader` | 无参数的节点侧 callable，每次返回当前 `{account_id: <会话真实账号>, session_id: <会话代次字符串>}`；默认 `None` |
+
+reader 必须读取独立的当前 QMT 会话事实，断开或无法读取时返回空值或抛错；会话代次必须在重连或账户切换时改变（即使切回同一账号）。它是节点装配接口，**不是一个假定存在的 QMT SDK 方法/字段**。本仓尚无经过实际节点验证的读取实现，因此默认关闭；禁止用配置账号、`_detect_account_id`、`AssetSnapshot.account_id` 回显、固定 session 字符串实现生产 reader。
+
+handler 建立时核验绑定与会话账号、服务账号一致；每次 ping 和交易入口重新读取。事实缺失、身份冲突或会话代次变化会使本 handler 的绑定失效，之后恢复旧值也不能重新授权。节点必须重新核验并重新提供绑定、重建 handler，不能依靠重启和照搬旧私有配置恢复权限。撤单还核对 gateway 的实际目标账号。
+
+RPC 参数、客户端 profile、端口/名称、STOCK 类型和写入开关不能提供或覆盖上述事实。批量下单先检查全部子项的账号，逐笔提交前再次核验会话；读查询和现有 RPC 方法集合保持原样。此变更收紧写入条件，不授权部署、真实模拟报单或实盘。
+
+离线验证：`uv run --frozen --with pytest python -m pytest tests/bigqmt_signal_trader/test_node_account_facts.py -q`。合成 QMT API/节点事实驱动真实 handler、provider、转换、风控及提交 journal，覆盖股票固定价 DAY 路径、部分成交、撤单、对账和拒绝矩阵。合成正例仅证明协议实现；BWT 固定提交与客户端 guard/journal 联合接线由 ZBW-34 在本 PR 合入后完成，原固定版本缺字段拒绝用例仍须保留。
 
 ## MiniQMT 兼容方法名
 

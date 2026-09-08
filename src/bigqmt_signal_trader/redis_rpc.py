@@ -357,6 +357,8 @@ class BigQmtRpcHandlers:
         allow_order_methods=False,
         allowed_methods=None,
         qmt_api=None,
+        node_account_binding=None,
+        session_facts_reader=None,
     ):
         self.account_id = str(account_id or "")
         self.market_data = market_data
@@ -368,6 +370,12 @@ class BigQmtRpcHandlers:
         # QMT runtime-injected global functions (passorder/get_trade_detail_data/
         # 融资融券查询等)。由 strategy._build_config 解析注入。
         self.qmt_api = dict(qmt_api or {})
+        # Node-owned inputs only: never populated from RPC parameters.
+        self._node_account_binding = dict(node_account_binding or {})
+        self._session_facts_reader = session_facts_reader
+        self._verified_session = None
+        self._binding_invalidated = False
+        self._account_environment()
         self._submit_journal = {}
         # Server-side diagnostic for silent failures (e.g. passorder submitted
         # but order not found in system). Surfaced to client via server_error.
@@ -379,6 +387,53 @@ class BigQmtRpcHandlers:
             self.allowed_methods = allowed
         else:
             self.allowed_methods = {str(method) for method in allowed_methods}
+
+    def _account_environment(self):
+        if self._binding_invalidated:
+            return None
+        binding = self._node_account_binding
+        try:
+            facts = self._session_facts_reader()
+            account_id = facts.get("account_id")
+            session_id = facts.get("session_id")
+            if (not isinstance(account_id, str) or not account_id
+                    or not isinstance(session_id, str) or not session_id
+                    or account_id != self.account_id
+                    or account_id != binding.get("account_id")
+                    or binding.get("account_environment") not in ("broker_sim", "live")):
+                raise ValueError("missing or conflicting node account facts")
+            if self._verified_session is None:
+                self._verified_session = session_id
+            elif session_id != self._verified_session:
+                raise ValueError("QMT session changed")
+        except Exception:
+            # A reconnect, identity change or loss of evidence requires a new
+            # node binding/handler; restoring an old session cannot rearm it.
+            self._binding_invalidated = True
+            return None
+        return binding["account_environment"]
+
+    def _check_order_account(self, params):
+        if self._request_account_id(params) != self.account_id:
+            raise PermissionError("account_id mismatch")
+        # Reject conflicting aliases even when account_id takes precedence.
+        account = params.get("account")
+        if isinstance(account, dict):
+            for key in ("account_id", "accountID", "id"):
+                if account.get(key) is not None and str(account[key]) != self.account_id:
+                    raise PermissionError("account_id mismatch")
+        elif account is not None and str(account) != self.account_id:
+            raise PermissionError("account_id mismatch")
+
+    def _require_order_environment(self, params):
+        if not self.allow_order_methods:
+            raise PermissionError("order rpc methods are disabled")
+        self._check_order_account(params)
+        if self._account_environment() != "broker_sim":
+            raise PermissionError("verified broker_sim node account is required")
+        gateway_account = getattr(self.order_gateway, "account_id", self.account_id)
+        if gateway_account != self.account_id:
+            raise PermissionError("order gateway account_id mismatch")
 
     def _request_account_id(self, params):
         params = params or {}
@@ -414,6 +469,7 @@ class BigQmtRpcHandlers:
         result = {
             "pong": True,
             "account_id": self.account_id,
+            "account_environment": self._account_environment(),
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
             "server_time": _dt.datetime.now(),
@@ -688,6 +744,7 @@ class BigQmtRpcHandlers:
         raise ValueError("action or order_type is required")
 
     def _handle_submit_order(self, params):
+        self._require_order_environment(params)
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
         price = params.get("price")
@@ -735,11 +792,14 @@ class BigQmtRpcHandlers:
         return result
 
     def _handle_submit_orders_batch(self, params):
+        self._require_order_environment(params)
         orders = params.get("orders") or []
         if not isinstance(orders, list) or not orders:
             raise ValueError("orders must be a non-empty list")
         if len(orders) > 500:
             raise ValueError("orders exceeds batch limit 500")
+        for item in orders:
+            self._check_order_account(dict(item or {}))
         batch_id = str(params.get("batch_id") or uuid.uuid4().hex)
         account_id = self._request_account_id(params)
         strategy_name = str(
@@ -844,6 +904,7 @@ class BigQmtRpcHandlers:
         return results
 
     def _handle_cancel_order(self, params):
+        self._require_order_environment(params)
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
         order_sys_id = str(params.get("order_sys_id") or params.get("order_sysid") or params.get("order_id") or "")

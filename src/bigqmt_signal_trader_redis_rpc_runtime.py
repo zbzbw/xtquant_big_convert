@@ -219,6 +219,8 @@ def _apply_config(account_id):
     configure(
         mode="bigqmt",
         account_id=account_id,
+        node_account_binding=BIGQMT_REDIS_CONFIG.get("node_account_binding"),
+        session_facts_reader=BIGQMT_REDIS_CONFIG.get("session_facts_reader"),
         position_sync_type="redis" if RPC_TRANSPORT in ("redis", "", "default") else "",
         enable_rpc=True,
         schedule_adjust=SCHEDULE_ADJUST_ENABLED,
