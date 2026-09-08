@@ -75,7 +75,7 @@ def make_handlers(qmt, **overrides):
         position_provider=BigQmtPositionProvider(qmt.query),
         order_gateway=BigQmtOrderGateway(qmt, "sim-account", qmt.passorder, qmt.cancel, qmt.query),
         allow_order_methods=True,
-        node_account_binding={"account_id": "sim-account", "account_environment": "broker_sim"},
+        node_account_binding={"account_id": "sim-account", "account_environment": "broker_sim", "session_id": "session-1"},
         session_facts_reader=qmt.session_facts,
     )
     options.update(overrides)
@@ -136,7 +136,7 @@ def test_environment_identity_matrix_zero_writes(environment, identity):
     qmt = SyntheticQmt()
     qmt.facts["account_id"] = identity
     handlers = make_handlers(qmt, node_account_binding={
-        "account_id": "sim-account", "account_environment": environment})
+        "account_id": "sim-account", "account_environment": environment, "session_id": "session-1"})
     expected = "live" if identity == "sim-account" and environment == "live" else None
     assert handlers.handle("ping")["account_environment"] == expected
     for method, params in [("order_stock", order()), ("order_stock_batch", {"orders": [order()]}),
@@ -155,7 +155,7 @@ def test_client_forgery_and_asset_echo_cannot_supply_evidence(overrides):
     qmt = SyntheticQmt()
     handlers = make_handlers(qmt, **overrides)
     forged = dict(account_id="sim-account", account_environment="broker_sim", orders_enabled=True,
-                  node_account_binding={"account_id": "sim-account", "account_environment": "broker_sim"},
+                  node_account_binding={"account_id": "sim-account", "account_environment": "broker_sim", "session_id": "session-1"},
                   session_id="session-1", account_type="STOCK")
     assert handlers.handle("get_asset").account_id == "sim-account"
     assert handlers.handle("ping", forged)["account_environment"] is None
@@ -222,7 +222,7 @@ def test_batch_rechecks_session_after_identity_query_before_write():
 
 def test_binding_is_copied_and_ping_does_not_authorize_future_cancel():
     qmt = SyntheticQmt()
-    binding = {"account_id": "sim-account", "account_environment": "live"}
+    binding = {"account_id": "sim-account", "account_environment": "live", "session_id": "session-1"}
     handlers = make_handlers(qmt, node_account_binding=binding)
     binding["account_environment"] = "broker_sim"
     assert handlers.handle("ping")["account_environment"] == "live"
@@ -243,7 +243,7 @@ def test_strategy_runtime_assembly_uses_only_node_inputs(monkeypatch):
     import bigqmt_signal_trader_redis_rpc_runtime as runtime
 
     qmt = SyntheticQmt()
-    config = {"node_account_binding": {"account_id": "sim-account", "account_environment": "broker_sim"},
+    config = {"node_account_binding": {"account_id": "sim-account", "account_environment": "broker_sim", "session_id": "session-1"},
               "session_facts_reader": qmt.session_facts}
     with patch.object(runtime, "BIGQMT_REDIS_CONFIG", config), patch.object(runtime, "configure") as configure:
         runtime._apply_config("sim-account")
@@ -257,3 +257,58 @@ def test_strategy_runtime_assembly_uses_only_node_inputs(monkeypatch):
     assembled["rpc"]["node_account_binding"] = config["node_account_binding"]
     service = strategy._build_rpc_service(qmt, app, assembled)
     assert service.handlers.handle("ping")["account_environment"] is None
+
+
+@pytest.mark.parametrize("observe_disconnect", [False, True])
+def test_service_rebuild_requires_binding_for_verified_session(observe_disconnect):
+    import bigqmt_signal_trader_strategy as strategy
+
+    qmt = SyntheticQmt()
+    binding = {"account_id": "sim-account", "account_environment": "broker_sim",
+               "session_id": "session-1"}
+    config = dict(account_id="sim-account", enable_rpc=True,
+                  rpc={"allow_order_methods": True}, node_account_binding=binding,
+                  session_facts_reader=qmt.session_facts,
+                  redis_client=MemoryRedis(), response_redis_client=MemoryRedis(),
+                  qmt_api={"get_trade_detail_data": qmt.query})
+    app = Row(order_gateway=make_handlers(qmt).order_gateway)
+    original = strategy._build_rpc_service(qmt, app, config)
+    assert original.handlers.handle("ping")["account_environment"] == "broker_sim"
+    qmt.facts["session_id"] = "session-2"
+    if observe_disconnect:
+        assert original.handlers.handle("ping")["account_environment"] is None
+
+    rebuilt = strategy._build_rpc_service(qmt, app, config)
+    for method, params in [("submit_order", order()),
+                           ("submit_orders_batch", {"orders": [order()]}),
+                           ("cancel_order", {"order_id": "order-1"})]:
+        response = rebuilt.process_request({"method": method, "params": params})
+        assert not response["ok"]
+        assert "verified broker_sim" in response["error"]
+    assert rebuilt.handlers.handle("ping")["account_environment"] is None
+    assert qmt.writes == [] and rebuilt.handlers._submit_journal == {}
+    assert binding["session_id"] == "session-1"
+
+    # Synthetic operator re-verification supplies a NEW binding for session-2.
+    config["node_account_binding"] = dict(binding, session_id="session-2")
+    renewed = strategy._build_rpc_service(qmt, app, config)
+    assert renewed.handlers.handle("ping")["account_environment"] == "broker_sim"
+    assert renewed.handlers.handle("submit_order", order()).status == "SUBMITTED"
+    assert renewed.handlers.handle("submit_orders_batch", {
+        "orders": [order(order_remark="tag-2")]
+    })[0]["accepted"]
+    assert renewed.handlers.handle("cancel_order", {"order_id": "order-1"}).success
+    assert [kind for kind, _ in qmt.writes] == ["submit", "submit", "cancel"]
+
+
+@pytest.mark.parametrize("session_id", [None, "", 1])
+def test_binding_without_verified_session_cannot_authorize(session_id):
+    qmt = SyntheticQmt()
+    binding = {"account_id": "sim-account", "account_environment": "broker_sim"}
+    if session_id is not None:
+        binding["session_id"] = session_id
+    handlers = make_handlers(qmt, node_account_binding=binding)
+    assert handlers.handle("ping")["account_environment"] is None
+    with pytest.raises(PermissionError):
+        handlers.handle("submit_order", order())
+    assert qmt.writes == []

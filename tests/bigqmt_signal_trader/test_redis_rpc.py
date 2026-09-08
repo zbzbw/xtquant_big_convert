@@ -81,7 +81,7 @@ def _service_with_listener_methods(allow_order_methods=False, process_in_listene
         market_data=FakeMarketData(),
         position_provider=FakePositionProvider(),
         order_gateway=order_gateway,
-        node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+        node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
         session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
         allow_order_methods=allow_order_methods,
     )
@@ -178,7 +178,7 @@ def _service_with_order_gateway(order_gateway, allow_order_methods=False):
         market_data=FakeMarketData(),
         position_provider=FakePositionProvider(),
         order_gateway=order_gateway,
-        node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+        node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
         session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
         allow_order_methods=allow_order_methods,
     )
@@ -232,7 +232,7 @@ class RedisRpcTest(unittest.TestCase):
             market_data=FakeMarketData(),
             position_provider=FakePositionProvider(),
             order_gateway=DryRunOrderGateway(),
-            node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+            node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
             session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
             allow_order_methods=True,
         )
@@ -260,7 +260,7 @@ class RedisRpcTest(unittest.TestCase):
         handlers = BigQmtRpcHandlers(
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
-            node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+            node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
             session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
             allow_order_methods=True,
         )
@@ -284,7 +284,7 @@ class RedisRpcTest(unittest.TestCase):
         handlers = BigQmtRpcHandlers(
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
-            node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+            node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
             session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
             allow_order_methods=True,
         )
@@ -308,7 +308,7 @@ class RedisRpcTest(unittest.TestCase):
         handlers = BigQmtRpcHandlers(
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
-            node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+            node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
             session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
             allow_order_methods=True,
         )
@@ -339,7 +339,7 @@ class RedisRpcTest(unittest.TestCase):
         handlers = BigQmtRpcHandlers(
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
-            node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+            node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
             session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
             allow_order_methods=True,
         )
@@ -360,7 +360,7 @@ class RedisRpcTest(unittest.TestCase):
         handlers = BigQmtRpcHandlers(
             account_id="acct", market_data=FakeMarketData(),
             position_provider=FakePositionProvider(), order_gateway=gateway,
-            node_account_binding={"account_id": "acct", "account_environment": "broker_sim"},
+            node_account_binding={"account_id": "acct", "account_environment": "broker_sim", "session_id": "synthetic-1"},
             session_facts_reader=lambda: {"account_id": "acct", "session_id": "synthetic-1"},
             allow_order_methods=True,
         )

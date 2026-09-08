@@ -373,7 +373,6 @@ class BigQmtRpcHandlers:
         # Node-owned inputs only: never populated from RPC parameters.
         self._node_account_binding = dict(node_account_binding or {})
         self._session_facts_reader = session_facts_reader
-        self._verified_session = None
         self._binding_invalidated = False
         self._account_environment()
         self._submit_journal = {}
@@ -396,16 +395,15 @@ class BigQmtRpcHandlers:
             facts = self._session_facts_reader()
             account_id = facts.get("account_id")
             session_id = facts.get("session_id")
+            # The operator-verified binding pins the session generation.
+            # Rebuilding a handler must never adopt the reader's first value.
             if (not isinstance(account_id, str) or not account_id
                     or not isinstance(session_id, str) or not session_id
+                    or session_id != binding.get("session_id")
                     or account_id != self.account_id
                     or account_id != binding.get("account_id")
                     or binding.get("account_environment") not in ("broker_sim", "live")):
                 raise ValueError("missing or conflicting node account facts")
-            if self._verified_session is None:
-                self._verified_session = session_id
-            elif session_id != self._verified_session:
-                raise ValueError("QMT session changed")
         except Exception:
             # A reconnect, identity change or loss of evidence requires a new
             # node binding/handler; restoring an old session cannot rearm it.

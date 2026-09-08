@@ -34,12 +34,12 @@
 
 | 输入 | 契约 |
 |---|---|
-| `node_account_binding` | `{account_id: <已核验账号>, account_environment: "broker_sim" 或 "live"}`；handler 复制绑定，默认 `None` |
+| `node_account_binding` | `{account_id: <已核验账号>, account_environment: "broker_sim" 或 "live", session_id: <核验时会话代次字符串>}`；节点核验时固定代次，handler 复制绑定，默认 `None` |
 | `session_facts_reader` | 无参数的节点侧 callable，每次返回当前 `{account_id: <会话真实账号>, session_id: <会话代次字符串>}`；默认 `None` |
 
 reader 必须读取独立的当前 QMT 会话事实，断开或无法读取时返回空值或抛错；会话代次必须在重连或账户切换时改变（即使切回同一账号）。它是节点装配接口，**不是一个假定存在的 QMT SDK 方法/字段**。本仓尚无经过实际节点验证的读取实现，因此默认关闭；禁止用配置账号、`_detect_account_id`、`AssetSnapshot.account_id` 回显、固定 session 字符串实现生产 reader。
 
-handler 建立时核验绑定与会话账号、服务账号一致；每次 ping 和交易入口重新读取。事实缺失、身份冲突或会话代次变化会使本 handler 的绑定失效，之后恢复旧值也不能重新授权。节点必须重新核验并重新提供绑定、重建 handler，不能依靠重启和照搬旧私有配置恢复权限。撤单还核对 gateway 的实际目标账号。
+handler 建立时以及每次 ping、交易入口均核对绑定账号、服务账号和当前会话账号，并要求当前 `session_id` 与绑定中核验时固定的代次一致。缺少绑定代次也保持 unknown，不能从 reader 首值补齐。事实缺失、身份冲突或会话代次变化会使本 handler 的绑定失效，之后恢复旧值也不能重新授权。重建服务继续比较原绑定代次，因此旧绑定无法授权新会话；只有节点重新核验后提供匹配新代次的新绑定并重建 handler，才能恢复。禁止在启动/重连时自动用 reader 当前值改写绑定，这不构成节点核验。撤单还核对 gateway 的实际目标账号。
 
 RPC 参数、客户端 profile、端口/名称、STOCK 类型和写入开关不能提供或覆盖上述事实。批量下单先检查全部子项的账号，逐笔提交前再次核验会话；读查询和现有 RPC 方法集合保持原样。此变更收紧写入条件，不授权部署、真实模拟报单或实盘。
 
