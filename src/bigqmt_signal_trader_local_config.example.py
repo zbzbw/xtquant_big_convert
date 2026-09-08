@@ -18,6 +18,12 @@ BIGQMT_REDIS_CONFIG = {
     "password": "",
     # Keep order RPC disabled unless you explicitly want remote order/cancel.
     "rpc_allow_order_methods": False,
+    # Node operator binding pins account_id, account_environment and the
+    # session_id verified by the operator; never adopt it on service startup.
+    # The reader independently supplies CURRENT QMT session evidence.
+    # See docs/BIG_QMT_REDIS_RPC.md; absent inputs keep ping environment null.
+    "node_account_binding": None,
+    "session_facts_reader": None,
     # Redis and ZMQ can both drain requests through QMT's official
     # run_time("adjust", ...) callback. This avoids GIL stalls in QMT's process.
     "rpc_process_in_listener": True,
