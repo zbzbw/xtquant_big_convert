@@ -20,9 +20,13 @@ import time
 
 ORDER_CHANNEL_TEMPLATE = "bigqmt:order_events:{account_id}"
 TRADE_CHANNEL_TEMPLATE = "bigqmt:trade_events:{account_id}"
+ORDER_ERROR_CHANNEL_TEMPLATE = "bigqmt:order_error_events:{account_id}"
+CANCEL_ERROR_CHANNEL_TEMPLATE = "bigqmt:cancel_error_events:{account_id}"
 
 EVENT_ORDER = "order"
 EVENT_TRADE = "trade"
+EVENT_ORDER_ERROR = "order_error"
+EVENT_CANCEL_ERROR = "cancel_error"
 
 # ThinkTrader enum_EEntrustBS (买卖方向, the m_nDirection field), universal across
 # 股票/期货/期权. Ref: https://dict.thinktrader.net/innerApi/enum_constants.html
@@ -65,6 +69,14 @@ def order_channel(account_id):
 
 def trade_channel(account_id):
     return TRADE_CHANNEL_TEMPLATE.format(account_id=str(account_id or ""))
+
+
+def order_error_channel(account_id):
+    return ORDER_ERROR_CHANNEL_TEMPLATE.format(account_id=str(account_id or ""))
+
+
+def cancel_error_channel(account_id):
+    return CANCEL_ERROR_CHANNEL_TEMPLATE.format(account_id=str(account_id or ""))
 
 
 def _attr(obj, names, default=None):
@@ -336,3 +348,43 @@ def publish_order_event(redis_client, account_id, event):
 
 def publish_trade_event(redis_client, account_id, event):
     return _publish(redis_client, trade_channel(account_id), event)
+
+
+def publish_order_error_event(redis_client, account_id, event):
+    return _publish(redis_client, order_error_channel(account_id), event)
+
+
+def publish_cancel_error_event(redis_client, account_id, event):
+    return _publish(redis_client, cancel_error_channel(account_id), event)
+
+
+def normalize_order_error_event(order_error, account_id=""):
+    """Build a JSON-able order-error event dict (废单/拒单).
+
+    QMT order callbacks carry the failed order via m_strOrderSysID / error info.
+    MiniQMT's on_order_error receives an XtOrderError with error_id/error_msg.
+    """
+    return {
+        "event_type": EVENT_ORDER_ERROR,
+        "account_id": str(_attr(order_error, ["m_strAccountID", "account_id"], account_id) or account_id or ""),
+        "stock_code": str(_attr(order_error, ["m_strInstrumentID", "stock_code"], "") or ""),
+        "order_sys_id": str(_attr(order_error, ["m_strOrderSysID", "order_sys_id", "order_sysid", "order_id"], "") or ""),
+        "error_id": _attr(order_error, ["m_nErrorID", "error_id", "m_nOrderStatus"]),
+        "error_msg": str(_attr(order_error, ["m_strErrorMsg", "error_msg", "m_strMsg"], "") or ""),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at_ts": time.time(),
+    }
+
+
+def normalize_cancel_error_event(cancel_error, account_id=""):
+    """Build a JSON-able cancel-error event dict (撤单失败)."""
+    return {
+        "event_type": EVENT_CANCEL_ERROR,
+        "account_id": str(_attr(cancel_error, ["m_strAccountID", "account_id"], account_id) or account_id or ""),
+        "stock_code": str(_attr(cancel_error, ["m_strInstrumentID", "stock_code"], "") or ""),
+        "order_sys_id": str(_attr(cancel_error, ["m_strOrderSysID", "order_sys_id", "order_sysid", "order_id"], "") or ""),
+        "error_id": _attr(cancel_error, ["m_nErrorID", "error_id"]),
+        "error_msg": str(_attr(cancel_error, ["m_strErrorMsg", "error_msg", "m_strMsg"], "") or ""),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at_ts": time.time(),
+    }

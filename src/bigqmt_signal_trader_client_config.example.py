@@ -79,3 +79,22 @@ BIGQMT_FORMULA_SERVER_CONFIG = {
     # "methods": [...],     # restrict routing to a subset (default: all mapped)
     # "failure_cooldown_seconds": 30.0,  # pause routing this long after a failure
 }
+
+# Whole-quote PUSH subscription (xtdata.subscribe_whole_quote, aligned with MiniQMT).
+#   Server pushes each incremental tick batch to every client subscribed to the
+#   same combination; the RPC methods above only manage the subscription lifecycle.
+#   Data flows over a separate push channel matching `transport` above
+#   (redis pub/sub, or zmq PUB/SUB when transport="zmq"), msgpack-encoded
+#   (install the `msgpack` extra; falls back to json if absent).
+#
+#   quote_client_id: process-stable subscriber id. The server counts references
+#     per (client_id, sub_id) and only tears down the shared big-QMT subscription
+#     after EVERY client of a combination unsubscribes or times out. Unset -> a
+#     persisted id is created at ~/.cache/bigqmt/quote_client_id so a restarted
+#     client is recognised as the same subscriber (needed for replay recovery).
+#   Heartbeat: client sends quote_keepalive every BIGQMT_QUOTE_HEARTBEAT_SECONDS
+#     (default 3.0). Server reaps a client after heartbeat_timeout_seconds
+#     (default 30s = 10 periods, configured server-side).
+BIGQMT_QUOTE_CLIENT_ID = None  # e.g. "my-strategy-1"; None -> persisted auto id
+# BIGQMT_QUOTE_HEARTBEAT_SECONDS = 3.0  # env var; must be < server timeout/periods
+

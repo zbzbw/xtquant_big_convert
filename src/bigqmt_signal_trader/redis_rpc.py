@@ -105,6 +105,15 @@ ORDER_METHODS = {
     "cancel_order",
 }
 
+# Whole-quote push subscription control methods. These drive a server-side
+# QuoteSubscriptionManager (reference-counted ContextInfo.subscribe_whole_quote)
+# rather than a market_data read; the data itself flows over the push channel.
+QUOTE_SUBSCRIPTION_METHODS = {
+    "subscribe_whole_quote",
+    "unsubscribe_whole_quote",
+    "quote_keepalive",
+}
+
 LISTENER_DEFERRED_METHODS = {
     # Large stream responses are expensive to normalize and encode. QMT gives
     # its background Python thread too little runtime for that work, producing
@@ -279,6 +288,7 @@ MARKET_DATA_METHODS = {
 # op — creates/updates a custom sector — but it is harmless to expose; trading
 # order writes stay gated behind ORDER_METHODS + allow_order_methods.)
 READ_METHODS |= MARKET_DATA_METHODS
+READ_METHODS |= QUOTE_SUBSCRIPTION_METHODS
 
 
 def _maybe_scalar(value):
@@ -359,6 +369,7 @@ class BigQmtRpcHandlers:
         qmt_api=None,
         node_account_binding=None,
         session_facts_reader=None,
+        quote_subscription_manager=None,
     ):
         self.account_id = str(account_id or "")
         self.market_data = market_data
@@ -367,6 +378,7 @@ class BigQmtRpcHandlers:
         self.position_sync_sink = position_sync_sink
         self.market_stream = market_stream
         self.allow_order_methods = bool(allow_order_methods)
+        self.quote_subscription_manager = quote_subscription_manager
         # QMT runtime-injected global functions (passorder/get_trade_detail_data/
         # 融资融券查询等)。由 strategy._build_config 解析注入。
         self.qmt_api = dict(qmt_api or {})
@@ -475,6 +487,49 @@ class BigQmtRpcHandlers:
         if self.market_stream is not None:
             result["market_stream"] = self.market_stream.status()
         return result
+
+    # ------------------------------------------------------------------
+    # 全推行情订阅控制（引用计数共享 ContextInfo.subscribe_whole_quote）。
+    # 数据本身走推送通道；这里只负责订阅生命周期 + 心跳。
+    # ------------------------------------------------------------------
+
+    def _require_quote_manager(self):
+        manager = self.quote_subscription_manager
+        if manager is None:
+            raise RuntimeError("whole-quote push subscription is not configured on this server")
+        return manager
+
+    @staticmethod
+    def _quote_params(params, require_codes=False):
+        params = params or {}
+        client_id = str(params.get("client_id") or "").strip()
+        sub_id = str(params.get("sub_id") or "").strip()
+        if not client_id:
+            raise ValueError("client_id is required")
+        if not sub_id:
+            raise ValueError("sub_id is required")
+        codes = [str(c) for c in (params.get("codes") or []) if str(c or "").strip()]
+        if require_codes and not codes:
+            raise ValueError("codes is required")
+        return client_id, sub_id, codes
+
+    def _handle_subscribe_whole_quote(self, params):
+        manager = self._require_quote_manager()
+        client_id, sub_id, codes = self._quote_params(params, require_codes=True)
+        return manager.subscribe(client_id, sub_id, codes)
+
+    def _handle_unsubscribe_whole_quote(self, params):
+        manager = self._require_quote_manager()
+        client_id, sub_id, _codes = self._quote_params(params)
+        manager.unsubscribe(client_id, sub_id)
+        return {}
+
+    def _handle_quote_keepalive(self, params):
+        manager = self._require_quote_manager()
+        client_id, sub_id, _codes = self._quote_params(params)
+        manager.keepalive(client_id, sub_id)
+        return {}
+
 
     def _handle_get_ticks(self, params):
         codes = params.get("codes")

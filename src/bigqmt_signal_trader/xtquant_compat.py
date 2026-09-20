@@ -51,6 +51,123 @@ ORDER_SUCCEEDED = 56
 ORDER_JUNK = 57
 ORDER_UNKNOWN = 255
 
+# ---------------------------------------------------------------------------
+# xtconstant 枚举常量（对齐原生 MiniQMT xtquant/xtconstant.py，91 个全量）
+# ---------------------------------------------------------------------------
+
+# 账号类型
+FUTURE_ACCOUNT = 1            # 期货
+SECURITY_ACCOUNT = 2          # 股票
+CREDIT_ACCOUNT = 3            # 信用
+FUTURE_OPTION_ACCOUNT = 5     # 期货期权
+STOCK_OPTION_ACCOUNT = 6      # 股票期权
+HUGANGTONG_ACCOUNT = 7        # 沪港通
+SHENGANGTONG_ACCOUNT = 11     # 深港通
+
+# 委托类型 - 期货六键风格
+FUTURE_OPEN_LONG = 0                  # 开多
+FUTURE_CLOSE_LONG_HISTORY = 1         # 平昨多
+FUTURE_CLOSE_LONG_TODAY = 2           # 平今多
+FUTURE_OPEN_SHORT = 3                 # 开空
+FUTURE_CLOSE_SHORT_HISTORY = 4        # 平昨空
+FUTURE_CLOSE_SHORT_TODAY = 5          # 平今空
+# 委托类型 - 期货四键风格
+FUTURE_CLOSE_LONG_TODAY_FIRST = 6     # 平多，优先平今
+FUTURE_CLOSE_LONG_HISTORY_FIRST = 7   # 平多，优先平昨
+FUTURE_CLOSE_SHORT_TODAY_FIRST = 8    # 平空，优先平今
+FUTURE_CLOSE_SHORT_HISTORY_FIRST = 9  # 平空，优先平昨
+# 委托类型 - 期货两键风格
+FUTURE_CLOSE_LONG_TODAY_HISTORY_THEN_OPEN_SHORT = 10  # 卖出，优先平仓平今，余量开空
+FUTURE_CLOSE_LONG_HISTORY_TODAY_THEN_OPEN_SHORT = 11  # 卖出，优先平仓平昨，余量开空
+FUTURE_CLOSE_SHORT_TODAY_HISTORY_THEN_OPEN_LONG = 12  # 买入，优先平仓平今，余量开多
+FUTURE_CLOSE_SHORT_HISTORY_TODAY_THEN_OPEN_LONG = 13  # 买入，优先平仓平昨，余量开多
+FUTURE_OPEN = 14               # 买入，不优先平仓
+FUTURE_CLOSE = 15              # 卖出，不优先平仓
+# 委托类型 - 期货跨商品套利
+FUTURE_ARBITRAGE_OPEN = 16               # 开仓
+FUTURE_ARBITRAGE_CLOSE_HISTORY_FIRST = 17  # 平，优先平昨
+FUTURE_ARBITRAGE_CLOSE_TODAY_FIRST = 18    # 平，优先平今
+# 委托类型 - 期货展期
+FUTURE_RENEW_LONG_CLOSE_HISTORY_FIRST = 19   # 看多，优先平昨
+FUTURE_RENEW_LONG_CLOSE_TODAY_FIRST = 20     # 看多，优先平今
+FUTURE_RENEW_SHORT_CLOSE_HISTORY_FIRST = 21  # 看空，优先平昨
+FUTURE_RENEW_SHORT_CLOSE_TODAY_FIRST = 22    # 看空，优先平今
+
+# 委托类型 - 股票
+STOCK_BUY = 23
+STOCK_SELL = 24
+# 委托类型 - 信用交易
+CREDIT_BUY = 23                       # 担保品买入
+CREDIT_SELL = 24                      # 担保品卖出
+CREDIT_FIN_BUY = 27                   # 融资买入
+CREDIT_SLO_SELL = 28                  # 融券卖出
+CREDIT_BUY_SECU_REPAY = 29            # 买券还券
+CREDIT_DIRECT_SECU_REPAY = 30         # 直接还券
+CREDIT_SELL_SECU_REPAY = 31           # 卖券还款
+CREDIT_DIRECT_CASH_REPAY = 32         # 直接还款
+CREDIT_FIN_BUY_SPECIAL = 40           # 专项融资买入
+CREDIT_SLO_SELL_SPECIAL = 41          # 专项融券卖出
+CREDIT_BUY_SECU_REPAY_SPECIAL = 42    # 专项买券还券
+CREDIT_DIRECT_SECU_REPAY_SPECIAL = 43  # 专项直接还券
+CREDIT_SELL_SECU_REPAY_SPECIAL = 44   # 专项卖券还款
+CREDIT_DIRECT_CASH_REPAY_SPECIAL = 45  # 专项直接还款
+
+# 委托类型 - 股票期权
+STOCK_OPTION_BUY_OPEN = 48       # 买入开仓
+STOCK_OPTION_SELL_CLOSE = 49     # 卖出平仓
+STOCK_OPTION_SELL_OPEN = 50      # 卖出开仓
+STOCK_OPTION_BUY_CLOSE = 51      # 买入平仓
+STOCK_OPTION_COVERED_OPEN = 52   # 备兑开仓
+STOCK_OPTION_COVERED_CLOSE = 53  # 备兑平仓
+STOCK_OPTION_CALL_EXERCISE = 54  # 认购行权
+STOCK_OPTION_PUT_EXERCISE = 55   # 认沽行权
+STOCK_OPTION_SECU_LOCK = 56      # 证券锁定
+STOCK_OPTION_SECU_UNLOCK = 57    # 证券解锁
+
+# 委托类型 - 期货期权
+OPTION_FUTURE_OPTION_EXERCISE = 100  # 期货期权行权
+
+# 报价类型（市价）
+LATEST_PRICE = 5                        # 最新价
+FIX_PRICE = 11                          # 指定价/限价
+MARKET_SH_CONVERT_5_CANCEL = 42         # 最优五档即时成交剩余撤销[上交所][股票]
+MARKET_SH_CONVERT_5_LIMIT = 43          # 最优五档即时成交剩转限价[上交所][股票]
+MARKET_PEER_PRICE_FIRST = 44            # 对手方最优价格委托
+MARKET_MINE_PRICE_FIRST = 45            # 本方最优价格委托
+MARKET_SZ_INSTBUSI_RESTCANCEL = 46      # 即时成交剩余撤销委托[深交所][股票][期权]
+MARKET_SZ_CONVERT_5_CANCEL = 47         # 最优五档即时成交剩余撤销[深交所][股票][期权]
+MARKET_SZ_FULL_OR_CANCEL = 48           # 全额成交或撤销委托[深交所][股票][期权]
+
+# 市场代码
+SH_MARKET = 0
+SZ_MARKET = 1
+
+# 委托状态
+ORDER_UNREPORTED = 48
+ORDER_WAIT_REPORTING = 49
+ORDER_REPORTED = 50
+ORDER_REPORTED_CANCEL = 51
+ORDER_PARTSUCC_CANCEL = 52
+ORDER_PART_CANCEL = 53
+ORDER_CANCELED = 54
+ORDER_PART_SUCC = 55
+ORDER_SUCCEEDED = 56
+ORDER_JUNK = 57
+ORDER_UNKNOWN = 255
+
+# 账号状态
+ACCOUNT_STATUS_INVALID = -1       # 无效
+ACCOUNT_STATUS_OK = 0             # 正常
+ACCOUNT_STATUS_WAITING_LOGIN = 1  # 连接中
+ACCOUNT_STATUSING = 2             # 登陆中
+ACCOUNT_STATUS_FAIL = 3           # 失败
+ACCOUNT_STATUS_INITING = 4        # 初始化中
+ACCOUNT_STATUS_CORRECTING = 5     # 数据刷新校正中
+ACCOUNT_STATUS_CLOSED = 6         # 收盘后
+ACCOUNT_STATUS_ASSIS_FAIL = 7     # 穿透副链接断开
+ACCOUNT_STATUS_DISABLEBYSYS = 8   # 系统停用
+ACCOUNT_STATUS_DISABLEBYUSER = 9  # 用户停用
+
 
 class CompatObject:
     """Small attribute object matching xtquant's object-style returns."""
@@ -86,6 +203,9 @@ class XtQuantTraderCallback:
         pass
 
     def on_order_stock_async_response(self, response):
+        pass
+
+    def on_cancel_order_stock_async_response(self, response):
         pass
 
     def on_account_status(self, status):
@@ -130,6 +250,47 @@ def _import_optional_module(module_name):
         raise
 
 
+def _quote_client_id():
+    """Process-stable client id for whole-quote subscriptions. Config or env wins;
+    otherwise read/create a persisted id so a restarted client is recognised as
+    the same subscriber by the server."""
+    client_config = load_client_config()
+    configured = client_config.get("quote_client_id") or os.environ.get("BIGQMT_QUOTE_CLIENT_ID")
+    if configured:
+        return str(configured)
+    cache_path = os.path.join(os.path.expanduser("~"), ".cache", "bigqmt", "quote_client_id")
+    try:
+        with open(cache_path, "r") as handle:
+            existing = handle.read().strip()
+            if existing:
+                return existing
+    except OSError:
+        pass
+    new_id = uuid.uuid4().hex
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w") as handle:
+            handle.write(new_id)
+    except OSError:
+        pass
+    return new_id
+
+
+def _quote_push_zmq_address(client):
+    """Derive the server whole-quote PUB address: same host as the RPC zmq
+    endpoint, RPC port + 1 (the PUB socket binds a distinct port)."""
+    from .transports.zmq_transport import DEFAULT_ZMQ_HOST, _default_zmq_port
+
+    zmq_config = dict(getattr(client, "zmq_config", {}) or {})
+    explicit = zmq_config.get("quote_push_connect_address")
+    if explicit:
+        return str(explicit)
+    host = zmq_config.get("host") or DEFAULT_ZMQ_HOST
+    port = zmq_config.get("port")
+    base_port = int(port) if port is not None else _default_zmq_port(client.account_id)
+    return "tcp://%s:%d" % (host, base_port + 1)
+
+
 def load_client_config(module_name=None):
     """Load local private client config without requiring environment variables."""
     candidates = []
@@ -171,6 +332,7 @@ def load_client_config(module_name=None):
             "full_tick_cache_config": full_tick_cache_config,
             "local_cache_config": local_cache_config,
             "formula_server_config": formula_server_config,
+            "quote_client_id": getattr(module, "BIGQMT_QUOTE_CLIENT_ID", None),
         }
     return {}
 
@@ -530,6 +692,8 @@ class BigQmtXtData:
         self.client = client
         self._subscribe_seq = int(time.time() * 1000)
         self._cache_obj = None
+        self._quote_session = None          # lazily built WholeQuoteClientSession
+        self._quote_session_factory = None  # test hook: returns a session-like object
 
     def _next_seq(self):
         self._subscribe_seq += 1
@@ -778,19 +942,66 @@ class BigQmtXtData:
             callback=callback,
         )
 
+    def _whole_quote_session(self):
+        if self._quote_session is None:
+            if self._quote_session_factory is not None:
+                self._quote_session = self._quote_session_factory()
+            else:
+                self._quote_session = self._build_quote_session()
+        return self._quote_session
+
+    def _build_quote_session(self):
+        from .whole_quote_session import WholeQuoteClientSession
+
+        client = self.client
+
+        def rpc_call(method, params):
+            return client.call(method, params)
+
+        return WholeQuoteClientSession(
+            rpc_call=rpc_call,
+            push_channel=self._build_quote_push_channel(),
+            client_id=_quote_client_id(),
+            heartbeat_interval_seconds=_env_float("BIGQMT_QUOTE_HEARTBEAT_SECONDS", 3.0),
+            sub_id_func=self._next_seq,
+        )
+
+    def _build_quote_push_channel(self):
+        """Build the push-channel subscriber matching the RPC transport: redis
+        deployments derive the channel locally; zmq deployments connect to the
+        server PUB socket (host from zmq config, RPC port + 1)."""
+        client = self.client
+        from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+
+        transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
+        if transport_name in ("zmq",):
+            address = _quote_push_zmq_address(client)
+            return ZmqQuotePushChannel(connect_address=address)
+        return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
+
     def subscribe_whole_quote(self, code_list, callback=None):
-        seq = self._next_seq()
-        payload = {"seq": seq, "code_list": list(code_list or []), "period": "full_tick"}
-        self.client.save_quote_subscription(seq, payload, active=True)
-        self.client.publish_event("subscribe_whole_quote", payload)
+        session = self._whole_quote_session()
+        session.start()
+        sub_id = session.subscribe_whole_quote(code_list, callback=callback)
+        # The big-QMT whole-quote callback is incremental (changed symbols only),
+        # so prime the callback once with a full get_full_tick snapshot.
         if callback is not None:
-            callback(self.get_full_tick(code_list))
-        return seq
+            try:
+                callback(self.get_full_tick(code_list))
+            except Exception:
+                pass
+        return sub_id
 
     def unsubscribe_quote(self, seq):
-        payload = {"seq": seq}
-        self.client.save_quote_subscription(seq, payload, active=False)
-        self.client.publish_event("unsubscribe_quote", payload)
+        # subscribe_whole_quote handles are owned by the push session; single-stock
+        # subscribe_quote seqs still retire through the legacy redis-event path.
+        session = self._quote_session
+        if session is not None and session.has_subscription(seq):
+            session.unsubscribe_quote(seq)
+        else:
+            payload = {"seq": seq}
+            self.client.save_quote_subscription(seq, payload, active=False)
+            self.client.publish_event("unsubscribe_quote", payload)
         return 0
 
     def run(self):
@@ -1264,6 +1475,7 @@ class BigQmtXtTrader:
     def connect(self):
         if self.client.account_id:
             self.client.call("ping")
+        self._fire_account_status()
         return 0
 
     def subscribe(self, account):
@@ -1272,6 +1484,7 @@ class BigQmtXtTrader:
         # (Re)start the listener now that the account is known; the loop resubscribes
         # to the account's channels within ~1s if the account changed.
         self._start_event_listener()
+        self._fire_account_status()
         return 0
 
     def stop(self):
@@ -1291,15 +1504,46 @@ class BigQmtXtTrader:
         )
         self._event_thread.start()
 
+    def _fire_account_status(self):
+        """Fire on_account_status after connect/subscribe (MiniQMT parity).
+
+        Big QMT has no per-strategy account-status push; we synthesize a
+        CONNECTED status once the RPC link is up so client code that waits
+        for on_account_status before trading keeps working.
+        """
+        callback = self.callback
+        if callback is None:
+            return
+        try:
+            callback.on_account_status(
+                CompatObject(
+                    account_id=str(self.client.account_id or ""),
+                    account_type="STOCK",
+                    status=1,  # ACCOUNT_STATUS_ONLINE (MiniQMT XtAccountStatus)
+                )
+            )
+        except Exception:
+            pass
+
     def _event_loop(self):
-        from .exec_events import order_channel, trade_channel
+        from .exec_events import (
+            order_channel,
+            trade_channel,
+            order_error_channel,
+            cancel_error_channel,
+        )
 
         while self._event_running:
             account_id = str(self.client.account_id or "")
             pubsub = None
             try:
                 pubsub = self.client._redis().pubsub(ignore_subscribe_messages=True)
-                pubsub.subscribe(order_channel(account_id), trade_channel(account_id))
+                pubsub.subscribe(
+                    order_channel(account_id),
+                    trade_channel(account_id),
+                    order_error_channel(account_id),
+                    cancel_error_channel(account_id),
+                )
                 while self._event_running:
                     if str(self.client.account_id or "") != account_id:
                         break  # account changed -> reconnect and resubscribe
@@ -1329,10 +1573,31 @@ class BigQmtXtTrader:
             return
         account_id = str(event.get("account_id") or self.client.account_id or "")
         try:
-            if event.get("event_type") == "trade":
+            event_type = event.get("event_type")
+            if event_type == "trade":
                 callback.on_stock_trade(self._trade_from_dict(account_id, event))
-            elif event.get("event_type") == "order":
+            elif event_type == "order":
                 callback.on_stock_order(self._order_from_dict(account_id, event))
+            elif event_type == "order_error":
+                callback.on_order_error(
+                    CompatObject(
+                        error_id=event.get("error_id"),
+                        error_msg=event.get("error_msg") or "",
+                        order_sys_id=event.get("order_sys_id") or "",
+                        order_id=event.get("order_sys_id") or "",
+                        stock_code=event.get("stock_code") or "",
+                    )
+                )
+            elif event_type == "cancel_error":
+                callback.on_cancel_error(
+                    CompatObject(
+                        error_id=event.get("error_id"),
+                        error_msg=event.get("error_msg") or "",
+                        order_sys_id=event.get("order_sys_id") or "",
+                        order_id=event.get("order_sys_id") or "",
+                        stock_code=event.get("stock_code") or "",
+                    )
+                )
         except Exception:
             pass
 
@@ -1547,7 +1812,73 @@ class BigQmtXtTrader:
         ) or {}
 
     def order_stock_async(self, *args, **kwargs):
-        return self.order_stock(*args, **kwargs)
+        # MiniQMT semantics: returns a seq; the result comes back through
+        # on_order_stock_async_response(seq, order_error|None). Our RPC is
+        # synchronous under the hood, so we fire the response callback
+        # immediately with the seq and the submitted order.
+        seq = self._next_async_seq()
+        stock_code = str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else ""))
+        try:
+            result = self.order_stock(*args, **kwargs)
+        except Exception as exc:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_order_error(
+                        CompatObject(
+                            error_id=getattr(exc, "errno", 0),
+                            error_msg=str(exc),
+                            order_sys_id="",
+                            order_id="",
+                            stock_code=stock_code,
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        # MiniQMT: order_stock returns -1 when the order failed to submit.
+        # NOTE: the server also pushes an order_error event for 废单 (via
+        # exec_events), so a client may see this -1 error AND the server's
+        # order_error — they carry different info (RPC submit failure vs QMT
+        # rejection detail). We fire it only when the callback was registered,
+        # keeping both signals available to the client.
+        if isinstance(result, int) and result == -1:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_order_error(
+                        CompatObject(
+                            error_id=-1,
+                            error_msg="order submit failed (order_stock returned -1)",
+                            order_sys_id="",
+                            order_id="",
+                            stock_code=stock_code,
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        callback = self.callback
+        if callback is not None:
+            try:
+                # Align with native XtOrderResponse: callback takes ONE arg
+                # (response) carrying account_id/order_id/seq/error_msg.
+                order_sys_id = str(result.get("order_sys_id") or result.get("order_sysid") or "") if isinstance(result, dict) else str(result)
+                callback.on_order_stock_async_response(
+                    CompatObject(
+                        account_id=self.client.account_id,
+                        seq=seq,
+                        order_id=order_sys_id or str(result.get("user_order_id") or "") if isinstance(result, dict) else str(result),
+                        order_sys_id=order_sys_id,
+                        stock_code=stock_code,
+                        strategy_name=str(kwargs.get("strategy_name") or (args[6] if len(args) > 6 else "")),
+                        order_remark=str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "")),
+                        error_msg="",
+                    ),
+                )
+            except Exception:
+                pass
+        return seq
 
     def order_stock_batch(self, account, orders, batch_id=""):
         account_id = _account_id(account, self.client.account_id)
@@ -1658,74 +1989,174 @@ class BigQmtXtTrader:
         BigQmtXtTrader._async_seq += 1
         return BigQmtXtTrader._async_seq
 
-    def query_stock_asset_async(self, account):
-        self.query_stock_asset(account)
+    def _async_query(self, sync_call, account, callback, *args, **kwargs):
+        """Shared async query helper.
+
+        MiniQMT's *_async query methods take a callback and hand the result to
+        it (they return None). We accept an OPTIONAL callback for compat: when
+        given, we call callback(result) synchronously (our RPC is already
+        synchronous) and return None like MiniQMT; when omitted, we keep our
+        seq-returning extension so existing callers don't break.
+        """
+        result = sync_call(account, *args, **kwargs)
+        if callback is not None:
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_stock_positions_async(self, account):
-        self.query_stock_positions(account)
+    def query_stock_asset_async(self, account, callback=None):
+        return self._async_query(self.query_stock_asset, account, callback)
+
+    def query_stock_positions_async(self, account, callback=None):
+        return self._async_query(self.query_stock_positions, account, callback)
+
+    def query_stock_orders_async(self, account, cancelable_only=False, callback=None):
+        if callback is not None:
+            result = self.query_stock_orders(account, cancelable_only)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_stock_orders_async(self, account, cancelable_only=False):
-        self.query_stock_orders(account, cancelable_only)
+    def query_stock_trades_async(self, account, callback=None):
+        return self._async_query(self.query_stock_trades, account, callback)
+
+    def query_account_infos_async(self, account=None, callback=None):
+        if callback is not None:
+            result = self.query_account_infos(account)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_stock_trades_async(self, account):
-        self.query_stock_trades(account)
+    def query_account_status_async(self, account=None, callback=None):
+        if callback is not None:
+            result = self.query_account_status(account)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_account_infos_async(self, account=None):
-        self.query_account_infos(account)
+    def query_credit_detail_async(self, account, callback=None):
+        return self._async_query(self.query_credit_detail, account, callback)
+
+    def query_stk_compacts_async(self, account, callback=None):
+        return self._async_query(self.query_stk_compacts, account, callback)
+
+    def query_credit_subjects_async(self, account, callback=None):
+        return self._async_query(self.query_credit_subjects, account, callback)
+
+    def query_credit_slo_code_async(self, account, callback=None):
+        return self._async_query(self.query_credit_slo_code, account, callback)
+
+    def query_credit_assure_async(self, account, callback=None):
+        return self._async_query(self.query_credit_assure, account, callback)
+
+    def query_ipo_data_async(self, account=None, callback=None):
+        if callback is not None:
+            result = self.query_ipo_data(account)
+            try:
+                callback(result)
+            except Exception:
+                pass
+            return None
         return self._next_async_seq()
 
-    def query_account_status_async(self, account=None):
-        self.query_account_status(account)
-        return self._next_async_seq()
+    def query_new_purchase_limit_async(self, account, callback=None):
+        return self._async_query(self.query_new_purchase_limit, account, callback)
 
-    def query_credit_detail_async(self, account):
-        self.query_credit_detail(account)
-        return self._next_async_seq()
-
-    def query_stk_compacts_async(self, account):
-        self.query_stk_compacts(account)
-        return self._next_async_seq()
-
-    def query_credit_subjects_async(self, account):
-        self.query_credit_subjects(account)
-        return self._next_async_seq()
-
-    def query_credit_slo_code_async(self, account):
-        self.query_credit_slo_code(account)
-        return self._next_async_seq()
-
-    def query_credit_assure_async(self, account):
-        self.query_credit_assure(account)
-        return self._next_async_seq()
-
-    def query_ipo_data_async(self, account=None):
-        self.query_ipo_data(account)
-        return self._next_async_seq()
-
-    def query_new_purchase_limit_async(self, account):
-        self.query_new_purchase_limit(account)
-        return self._next_async_seq()
-
-    def query_appointment_info_async(self, account):
-        self.query_appointment_info(account)
-        return self._next_async_seq()
+    def query_appointment_info_async(self, account, callback=None):
+        return self._async_query(self.query_appointment_info, account, callback)
 
     def cancel_order_stock_async(self, account, order_id):
-        return self.cancel_order_stock(account, order_id)
+        # MiniQMT: returns seq, result comes back via on_cancel_order_stock_async_response.
+        seq = self._next_async_seq()
+        try:
+            ok = self.cancel_order_stock(account, order_id)
+        except Exception as exc:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_cancel_error(
+                        CompatObject(
+                            error_id=getattr(exc, "errno", 0),
+                            error_msg=str(exc),
+                            order_sys_id=str(order_id or ""),
+                            stock_code="",
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        callback = self.callback
+        if callback is not None:
+            try:
+                callback.on_cancel_order_stock_async_response(
+                    CompatObject(
+                        account_id=self.client.account_id,
+                        seq=seq,
+                        success=bool(ok),
+                        order_sys_id=str(order_id or ""),
+                        order_id=str(order_id or ""),
+                    ),
+                )
+            except Exception:
+                pass
+        return seq
 
     def cancel_order_stock_sysid_async(self, account, market, order_sysid):
-        return self.cancel_order_stock_sysid(account, market, order_sysid)
+        seq = self._next_async_seq()
+        try:
+            ok = self.cancel_order_stock_sysid(account, market, order_sysid)
+        except Exception as exc:
+            callback = self.callback
+            if callback is not None:
+                try:
+                    callback.on_cancel_error(
+                        CompatObject(
+                            error_id=getattr(exc, "errno", 0),
+                            error_msg=str(exc),
+                            order_sys_id=str(order_sysid or ""),
+                            stock_code="",
+                        )
+                    )
+                except Exception:
+                    pass
+            return seq
+        callback = self.callback
+        if callback is not None:
+            try:
+                callback.on_cancel_order_stock_async_response(
+                    CompatObject(
+                        account_id=self.client.account_id,
+                        seq=seq,
+                        success=bool(ok),
+                        order_sys_id=str(order_sysid or ""),
+                        order_id=str(order_sysid or ""),
+                    ),
+                )
+            except Exception:
+                pass
+        return seq
 
     def set_relaxed_response_order_enabled(self, enabled=True):
         # 内部行为开关，RPC 模式下无意义，no-op。
         return 0
 
-    def smt_appointment_async(self, *args, **kwargs):
-        raise NotImplementedError("smt_appointment is not supported via Big QMT RPC")
+    def smt_appointment_async(self, account, stock_code, apt_days, apt_volume,
+                              fare_ratio, sub_rare_ratio, fine_ratio, begin_date):
+        # SMB/预约打新走独立通道，RPC 桥不支持；返回 -1 表示失败（对齐 MiniQMT
+        # 语义：seq 为 -1 表示委托失败）。
+        return -1
 
     def _order_from_dict(self, account_id, item):
         action = item.get("action")

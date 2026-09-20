@@ -9,9 +9,13 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bigqmt_signal_trader.exec_events import (
     format_raw_snapshot,
+    normalize_cancel_error_event,
+    normalize_order_error_event,
     normalize_order_event,
     normalize_trade_event,
     order_channel,
+    order_error_channel,
+    cancel_error_channel,
     publish_order_event,
     publish_trade_event,
     raw_field_snapshot,
@@ -63,12 +67,32 @@ class RecordingCallback(XtQuantTraderCallback):
     def __init__(self):
         self.orders = []
         self.trades = []
+        self.order_errors = []
+        self.cancel_errors = []
+        self.async_responses = []
+        self.cancel_async_responses = []
+        self.account_statuses = []
 
     def on_stock_order(self, order):
         self.orders.append(order)
 
     def on_stock_trade(self, trade):
         self.trades.append(trade)
+
+    def on_order_error(self, order_error):
+        self.order_errors.append(order_error)
+
+    def on_cancel_error(self, cancel_error):
+        self.cancel_errors.append(cancel_error)
+
+    def on_order_stock_async_response(self, response):
+        self.async_responses.append(response)
+
+    def on_cancel_order_stock_async_response(self, response):
+        self.cancel_async_responses.append(response)
+
+    def on_account_status(self, status):
+        self.account_statuses.append(status)
 
 
 class ExecEventsServerTest(unittest.TestCase):
@@ -201,6 +225,43 @@ class ExecEventsServerTest(unittest.TestCase):
         self.assertEqual(ev["action"], "")   # pledge is neither buy nor sell
         self.assertEqual(ev["direction"], 81)  # raw direction preserved
 
+    def test_normalize_order_error_event_maps_fields(self):
+        class OrderError:
+            m_strAccountID = "acct"
+            m_strInstrumentID = "600654.SH"
+            m_strOrderSysID = "sys-err-1"
+            m_nErrorID = 2147483647
+            m_strErrorMsg = "废单"
+
+        ev = normalize_order_error_event(OrderError(), "acct")
+
+        self.assertEqual(ev["event_type"], "order_error")
+        self.assertEqual(ev["account_id"], "acct")
+        self.assertEqual(ev["stock_code"], "600654.SH")
+        self.assertEqual(ev["order_sys_id"], "sys-err-1")
+        self.assertEqual(ev["error_id"], 2147483647)
+        self.assertEqual(ev["error_msg"], "废单")
+
+    def test_normalize_cancel_error_event_maps_fields(self):
+        class CancelError:
+            m_strAccountID = "acct"
+            m_strInstrumentID = "600654.SH"
+            m_strOrderSysID = "sys-cancel-1"
+            m_nErrorID = 99
+            m_strErrorMsg = "撤单失败"
+
+        ev = normalize_cancel_error_event(CancelError(), "acct")
+
+        self.assertEqual(ev["event_type"], "cancel_error")
+        self.assertEqual(ev["account_id"], "acct")
+        self.assertEqual(ev["order_sys_id"], "sys-cancel-1")
+        self.assertEqual(ev["error_id"], 99)
+        self.assertEqual(ev["error_msg"], "撤单失败")
+
+    def test_error_channels_are_account_scoped(self):
+        self.assertTrue(order_error_channel("acct").endswith(":acct"))
+        self.assertTrue(cancel_error_channel("acct").endswith(":acct"))
+
 
 class RawFieldSnapshotTest(unittest.TestCase):
     """The snapshot exists to settle what live callbacks actually carry, so it
@@ -321,6 +382,122 @@ class ExecEventsClientDispatchTest(unittest.TestCase):
         trader = BigQmtXtTrader(account_id="acct")
         # No callback registered; must not raise.
         trader._dispatch_event(json.dumps({"event_type": "trade"}).encode("utf-8"))
+
+    def test_dispatch_order_error_invokes_on_order_error(self):
+        trader, cb = self._trader()
+        event = {
+            "event_type": "order_error",
+            "account_id": "acct",
+            "stock_code": "600654.SH",
+            "order_sys_id": "sys-err-1",
+            "error_id": 2147483647,
+            "error_msg": "废单",
+        }
+        trader._dispatch_event(json.dumps(event).encode("utf-8"))
+
+        self.assertEqual(len(cb.order_errors), 1)
+        err = cb.order_errors[0]
+        self.assertEqual(err.order_id, "sys-err-1")
+        self.assertEqual(err.error_id, 2147483647)
+        self.assertEqual(err.error_msg, "废单")
+        self.assertEqual(err.stock_code, "600654.SH")
+
+    def test_dispatch_cancel_error_invokes_on_cancel_error(self):
+        trader, cb = self._trader()
+        event = {
+            "event_type": "cancel_error",
+            "account_id": "acct",
+            "stock_code": "600654.SH",
+            "order_sys_id": "sys-cancel-1",
+            "error_id": 99,
+            "error_msg": "撤单失败",
+        }
+        trader._dispatch_event(json.dumps(event).encode("utf-8"))
+
+        self.assertEqual(len(cb.cancel_errors), 1)
+        err = cb.cancel_errors[0]
+        self.assertEqual(err.order_id, "sys-cancel-1")
+        self.assertEqual(err.error_id, 99)
+        self.assertEqual(err.error_msg, "撤单失败")
+
+    def test_order_stock_async_returns_seq_and_fires_response(self):
+        trader, cb = self._trader()
+        # order_stock is stubbed? No — it would do an RPC. Instead call the
+        # helper directly with a dict-like result via monkeypatching is heavy;
+        # here we only verify the seq increments and the async-response path
+        # fires when order_stock returns a dict (mocked below).
+        original_order_stock = trader.order_stock
+
+        def fake_order_stock(*args, **kwargs):
+            return {"order_sys_id": "sys-ok-1", "user_order_id": "u-1"}
+
+        trader.order_stock = fake_order_stock
+        try:
+            seq = trader.order_stock_async("acct", "600654.SH", 23, 100, 11, 10.0, "s", "r")
+        finally:
+            trader.order_stock = original_order_stock
+
+        self.assertGreater(seq, 0)
+        self.assertEqual(len(cb.async_responses), 1)
+        resp = cb.async_responses[0]
+        self.assertEqual(resp.order_id, "sys-ok-1")
+        self.assertEqual(resp.account_id, "acct")
+        self.assertEqual(resp.seq, seq)
+    def test_order_stock_async_minus_one_fires_order_error(self):
+        trader, cb = self._trader()
+        original_order_stock = trader.order_stock
+
+        def fake_order_stock(*args, **kwargs):
+            return -1  # MiniQMT: submit failed
+
+        trader.order_stock = fake_order_stock
+        try:
+            seq = trader.order_stock_async("acct", "600654.SH", 23, 100, 11, 10.0, "s", "r")
+        finally:
+            trader.order_stock = original_order_stock
+
+        self.assertGreater(seq, 0)
+        self.assertEqual(len(cb.order_errors), 1)
+        err = cb.order_errors[0]
+        self.assertEqual(err.error_id, -1)
+        self.assertEqual(err.stock_code, "600654.SH")
+        # No success response for a failed submit.
+        self.assertEqual(len(cb.async_responses), 0)
+
+    def test_cancel_order_stock_async_fires_response(self):
+        trader, cb = self._trader()
+        original = trader.cancel_order_stock_sysid
+
+        def fake_cancel(account, market, sysid):
+            return True
+
+        trader.cancel_order_stock_sysid = fake_cancel
+        try:
+            seq = trader.cancel_order_stock_sysid_async("acct", "SH", "sys-1")
+        finally:
+            trader.cancel_order_stock_sysid = original
+
+        self.assertGreater(seq, 0)
+        self.assertEqual(len(cb.cancel_async_responses), 1)
+        resp = cb.cancel_async_responses[0]
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.order_sys_id, "sys-1")
+        self.assertEqual(resp.account_id, "acct")
+        self.assertEqual(resp.seq, seq)
+
+    def test_connect_and_subscribe_fire_account_status(self):
+        trader, cb = self._trader()
+        trader.client.account_id = "acct"
+        # connect() calls ping via RPC — stub it.
+        trader.client.call = lambda *a, **k: {"ok": True}
+        trader.connect()
+        trader.subscribe("acct")
+
+        self.assertEqual(len(cb.account_statuses), 2)
+        status = cb.account_statuses[0]
+        self.assertEqual(status.account_id, "acct")
+        self.assertEqual(status.account_type, "STOCK")
+        self.assertEqual(status.status, 1)
 
 
 if __name__ == "__main__":
