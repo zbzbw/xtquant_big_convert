@@ -21,7 +21,7 @@ from .code_utils import normalize_stock_code
 from .models import AccountSnapshot, OrderRef, OrderRequest
 
 
-RPC_REVISION = "20260809-market-stream-v2"
+RPC_REVISION = "20260920-market-stream-v3"
 
 
 JSON_READY_METHODS = {

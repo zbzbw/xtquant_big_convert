@@ -7,7 +7,9 @@ header. Business logic stays in the importable package.
 """
 
 import datetime
+import hashlib
 import importlib as _importlib
+import json
 import sys
 import threading
 import time
@@ -422,6 +424,12 @@ def _start_market_stream(context_info, config):
     if not markets:
         raise ValueError("market_stream markets must not be empty")
 
+    requested_instruments = sorted(set(
+        str(value or "").strip().upper()
+        for value in (stream_config.get("instruments") or ())
+        if str(value or "").strip()
+    ))
+
     def market_for_code(code):
         text = str(code or "").strip().upper()
         for market in markets:
@@ -436,7 +444,15 @@ def _start_market_stream(context_info, config):
     ]
     universe = None
     sector_counts = {}
-    if sector_keys:
+    if requested_instruments:
+        invalid = [code for code in requested_instruments if market_for_code(code) is None]
+        if invalid:
+            raise ValueError(
+                "market_stream instruments are outside configured markets: %s"
+                % ",".join(invalid)
+            )
+        universe = frozenset(requested_instruments)
+    elif sector_keys:
         get_sector = getattr(context_info, "get_stock_list_in_sector", None)
         if not callable(get_sector):
             raise RuntimeError("ContextInfo.get_stock_list_in_sector is unavailable")
@@ -480,13 +496,34 @@ def _start_market_stream(context_info, config):
     else:
         from bigqmt_signal_trader.market_stream import MarketStreamBuffer
 
+    identity_markets = (
+        sorted(set(market_for_code(code) for code in requested_instruments))
+        if requested_instruments else sorted(markets)
+    )
+    identity_payload = {
+        "markets": identity_markets,
+        "instruments": sorted(universe or ()),
+    }
+    universe_identity = hashlib.sha256(
+        json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    requested_payload = {
+        "markets": identity_markets,
+        "instruments": requested_instruments,
+    }
+    subscription_identity = hashlib.sha256(
+        json.dumps(requested_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
     buffer = MarketStreamBuffer(
         max_batches=int(stream_config.get("max_batches") or 20000),
         max_records=int(stream_config.get("max_records") or 1000000),
         batch_max_records=int(
-            stream_config.get("batch_max_records") or 1000
+            stream_config.get("batch_max_records")
+            or min(1000, int(stream_config.get("max_records") or 1000000))
         ),
         universe_size=0 if universe is None else len(universe),
+        subscription_identity=subscription_identity,
+        universe_identity=universe_identity,
     )
     pending_bootstrap_markets = set(markets)
     callback_lock = threading.Lock()

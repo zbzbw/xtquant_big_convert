@@ -50,6 +50,9 @@ BIGQMT_REDIS_CONFIG = {
     # ordered, gap-detectable RPC buffer for an external market recorder.
     "market_stream_enabled": False,
     "market_stream_markets": ("SH", "SZ"),
+    # Delivery recording must name the exact finite subscription. Leave empty
+    # only for the legacy whole-market/sector stream.
+    "market_stream_instruments": (),
     "market_stream_max_batches": 20000,
     "market_stream_max_records": 1000000,
     "market_stream_batch_max_records": 1000,

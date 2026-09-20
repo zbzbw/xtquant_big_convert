@@ -245,9 +245,14 @@ def test_strategy_runtime_assembly_uses_only_node_inputs(monkeypatch):
     qmt = SyntheticQmt()
     config = {"node_account_binding": {"account_id": "sim-account", "account_environment": "broker_sim", "session_id": "session-1"},
               "session_facts_reader": qmt.session_facts}
-    with patch.object(runtime, "BIGQMT_REDIS_CONFIG", config), patch.object(runtime, "configure") as configure:
+    with patch.object(runtime, "BIGQMT_REDIS_CONFIG", config), patch.object(
+        runtime, "MARKET_STREAM_INSTRUMENTS", ("000001.SZ", "600000.SH")
+    ), patch.object(runtime, "configure") as configure:
         runtime._apply_config("sim-account")
     assembled = configure.call_args.kwargs
+    assert assembled["market_stream"]["instruments"] == (
+        "000001.SZ", "600000.SH"
+    )
     assembled.update(redis_client=MemoryRedis(), response_redis_client=MemoryRedis(),
                      qmt_api={"get_trade_detail_data": qmt.query})
     app = Row(order_gateway=make_handlers(qmt).order_gateway)

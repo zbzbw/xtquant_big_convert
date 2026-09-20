@@ -279,6 +279,34 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
         self.assertEqual(result["universe_size"], 4)
         self.assertEqual(result["filtered_records"], 1)
 
+    def test_market_stream_binds_exact_instrument_identity(self):
+        context = FakeMarketStreamContext()
+        stream = strategy_module._start_market_stream(
+            context,
+            {"market_stream": {
+                "enabled": True,
+                "markets": ("SH", "SZ"),
+                "instruments": ("000001.SZ", "600000.SH", "000001.SZ"),
+                "max_batches": 10,
+                "max_records": 100,
+            }},
+        )
+        context.market_callback({
+            "600000.SH": {"time": 1},
+            "000001.SZ": {"time": 1},
+            "600001.SH": {"time": 1},
+        })
+
+        status = stream.status()
+        result = stream.drain(after_sequence=0)
+
+        self.assertEqual(status["universe_size"], 2)
+        self.assertEqual(
+            {code for batch in result["batches"] for code in batch["records"]},
+            {"000001.SZ", "600000.SH"},
+        )
+        self.assertEqual(status["subscription_identity"], status["universe_identity"])
+
     def test_zmq_rpc_build_does_not_create_redis_clients(self):
         config = {
             "account_id": "acct",
