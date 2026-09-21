@@ -7,7 +7,9 @@ header. Business logic stays in the importable package.
 """
 
 import datetime
+import hashlib
 import importlib as _importlib
+import json
 import sys
 import threading
 import time
@@ -75,6 +77,14 @@ _LATENCY_PROBE_THRESHOLD_MS = 50.0
 _latency_probe_started = False
 _last_full_tick_refresh_at = 0.0
 _last_full_tick_market_refresh_at = 0.0
+_market_stream_buffer = None
+_market_stream_context = None
+_market_stream_subscription_id = None
+_MARKET_STREAM_SECTOR_ALIASES = {
+    "cn_a_share": "\u6caa\u6df1A\u80a1",
+    "cn_etf": "\u6caa\u6df1ETF",
+    "cn_index": "\u6caa\u6df1\u6307\u6570",
+}
 # Observed adjust cadence, so a mis-scheduled run_time (e.g. clamped to bar
 # cadence) is visible in the logs instead of silently costing latency.
 _adjust_tick_stats = {"last_ts": 0.0, "count": 0, "window_start": 0.0, "sum": 0.0, "min": 0.0, "max": 0.0}
@@ -113,6 +123,7 @@ def bind_qmt_api(passorder_func=None, cancel_func=None, get_trade_detail_data_fu
 
 def reset_app():
     global _adjust_logged, _rpc_service, _scheduled_adjust, _last_full_tick_refresh_at, _last_full_tick_market_refresh_at
+    _stop_market_stream()
     _adjust_logged = False
     _scheduled_adjust = False
     _last_full_tick_refresh_at = 0.0
@@ -262,11 +273,11 @@ def _build_quote_subscription_service(context_info, config, transport_name, acco
         return None
     if _load_bridge_module is not None:
         _qsm = _load_bridge_module("bigqmt_signal_trader.quote_subscription_manager")
+        import importlib
+
+        _qsm = importlib.reload(_qsm)
     else:
         from bigqmt_signal_trader import quote_subscription_manager as _qsm
-    import importlib
-
-    _qsm = importlib.reload(_qsm)
     heartbeat_timeout = float(quote_config.get("heartbeat_timeout_seconds", 30.0))
     zmq_bind_address = quote_config.get("zmq_bind_address")
     return _qsm.build_quote_subscription_service(
@@ -360,9 +371,12 @@ def _build_rpc_service(context_info, app, config):
         ),
         order_gateway=getattr(app, "order_gateway", None),
         position_sync_sink=getattr(app, "position_sync_sink", None),
+        market_stream=_market_stream_buffer,
         allow_order_methods=allow_order_methods,
         allowed_methods=rpc_config.get("allowed_methods"),
         qmt_api=qmt_api,
+        node_account_binding=config.get("node_account_binding"),
+        session_facts_reader=config.get("session_facts_reader"),
         quote_subscription_manager=quote_manager,
     )
     process_in_listener = _config_bool(rpc_config.get("process_in_listener"), True)
@@ -422,6 +436,204 @@ def _start_rpc_service(context_info, app, config):
             except Exception as exc:
                 print("[bigqmt_quote_push] publisher start failed: %s" % exc)
     return _rpc_service
+
+
+def _stop_market_stream():
+    global _market_stream_buffer, _market_stream_context, _market_stream_subscription_id
+    context_info = _market_stream_context
+    subscription_id = _market_stream_subscription_id
+    _market_stream_buffer = None
+    _market_stream_context = None
+    _market_stream_subscription_id = None
+    if context_info is None or subscription_id is None:
+        return
+    unsubscribe = getattr(context_info, "unsubscribe_quote", None)
+    if callable(unsubscribe):
+        try:
+            unsubscribe(subscription_id)
+        except Exception as exc:
+            print("[bigqmt_market_stream] unsubscribe failed: %s" % exc)
+
+
+def _start_market_stream(context_info, config):
+    global _market_stream_buffer, _market_stream_context, _market_stream_subscription_id
+    stream_config = dict(config.get("market_stream") or {})
+    if not _config_bool(stream_config.get("enabled"), False):
+        return None
+    subscribe = getattr(context_info, "subscribe_whole_quote", None)
+    if not callable(subscribe):
+        raise RuntimeError("ContextInfo.subscribe_whole_quote is unavailable")
+    markets = [
+        str(value or "").strip().upper()
+        for value in (stream_config.get("markets") or ("SH", "SZ"))
+        if str(value or "").strip()
+    ]
+    if not markets:
+        raise ValueError("market_stream markets must not be empty")
+
+    requested_instruments = sorted(set(
+        str(value or "").strip().upper()
+        for value in (stream_config.get("instruments") or ())
+        if str(value or "").strip()
+    ))
+
+    def market_for_code(code):
+        text = str(code or "").strip().upper()
+        for market in markets:
+            if text.endswith("." + market) or text.startswith(market + "."):
+                return market
+        return None
+
+    sector_keys = [
+        str(value or "").strip()
+        for value in (stream_config.get("sectors") or ())
+        if str(value or "").strip()
+    ]
+    universe = None
+    sector_counts = {}
+    if requested_instruments:
+        invalid = [code for code in requested_instruments if market_for_code(code) is None]
+        if invalid:
+            raise ValueError(
+                "market_stream instruments are outside configured markets: %s"
+                % ",".join(invalid)
+            )
+        universe = frozenset(requested_instruments)
+    elif sector_keys:
+        get_sector = getattr(context_info, "get_stock_list_in_sector", None)
+        if not callable(get_sector):
+            raise RuntimeError("ContextInfo.get_stock_list_in_sector is unavailable")
+        resolved_universe = set()
+        for sector_key in sector_keys:
+            sector_name = _MARKET_STREAM_SECTOR_ALIASES.get(
+                sector_key,
+                sector_key,
+            )
+            try:
+                values = get_sector(sector_name, -1)
+            except TypeError:
+                values = get_sector(sector_name)
+            normalized = {
+                str(code or "").strip().upper()
+                for code in (values or ())
+                if market_for_code(code) is not None
+            }
+            if not normalized:
+                raise RuntimeError(
+                    "market stream sector is empty: %s" % sector_key
+                )
+            sector_counts[sector_key] = len(normalized)
+            resolved_universe.update(normalized)
+        missing_markets = [
+            market
+            for market in markets
+            if not any(market_for_code(code) == market for code in resolved_universe)
+        ]
+        if missing_markets:
+            raise RuntimeError(
+                "market stream universe has no codes for markets: %s"
+                % ",".join(missing_markets)
+            )
+        universe = frozenset(resolved_universe)
+    if _market_stream_buffer is not None:
+        _stop_market_stream()
+    if _load_bridge_module is not None:
+        module = _load_bridge_module("bigqmt_signal_trader.market_stream")
+        MarketStreamBuffer = module.MarketStreamBuffer
+    else:
+        from bigqmt_signal_trader.market_stream import MarketStreamBuffer
+
+    identity_markets = (
+        sorted(set(market_for_code(code) for code in requested_instruments))
+        if requested_instruments else sorted(markets)
+    )
+    identity_payload = {
+        "markets": identity_markets,
+        "instruments": sorted(universe or ()),
+    }
+    universe_identity = hashlib.sha256(
+        json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    requested_payload = {
+        "markets": identity_markets,
+        "instruments": requested_instruments,
+    }
+    subscription_identity = hashlib.sha256(
+        json.dumps(requested_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    buffer = MarketStreamBuffer(
+        max_batches=int(stream_config.get("max_batches") or 20000),
+        max_records=int(stream_config.get("max_records") or 1000000),
+        batch_max_records=int(
+            stream_config.get("batch_max_records")
+            or min(1000, int(stream_config.get("max_records") or 1000000))
+        ),
+        universe_size=0 if universe is None else len(universe),
+        subscription_identity=subscription_identity,
+        universe_identity=universe_identity,
+    )
+    pending_bootstrap_markets = set(markets)
+    callback_lock = threading.Lock()
+
+    def on_market_data(records):
+        try:
+            received_at_ns = int(time.time() * 1000000000)
+            with callback_lock:
+                bootstrap_records = {}
+                incremental_records = {}
+                observed_bootstrap_markets = set()
+                filtered_records = 0
+                for code, value in records.items():
+                    normalized_code = str(code or "").strip().upper()
+                    if universe is not None and normalized_code not in universe:
+                        filtered_records += 1
+                        continue
+                    market = market_for_code(normalized_code)
+                    if market in pending_bootstrap_markets:
+                        bootstrap_records[normalized_code] = value
+                        observed_bootstrap_markets.add(market)
+                    else:
+                        incremental_records[normalized_code] = value
+                if filtered_records:
+                    buffer.record_filtered_records(filtered_records)
+                pending_bootstrap_markets.difference_update(
+                    observed_bootstrap_markets
+                )
+                if bootstrap_records:
+                    buffer.append(
+                        bootstrap_records,
+                        received_at_ns=received_at_ns,
+                        is_bootstrap=True,
+                    )
+                if incremental_records:
+                    buffer.append(
+                        incremental_records,
+                        received_at_ns=received_at_ns,
+                        is_bootstrap=False,
+                    )
+        except Exception as exc:
+            buffer.record_callback_error()
+            print("[bigqmt_market_stream] callback failed: %s" % exc)
+
+    subscription_id = subscribe(markets, callback=on_market_data)
+    if subscription_id is None or int(subscription_id) <= 0:
+        raise RuntimeError("whole-market quote subscription failed")
+    _market_stream_buffer = buffer
+    _market_stream_context = context_info
+    _market_stream_subscription_id = int(subscription_id)
+    print(
+        "[bigqmt_market_stream] subscribed markets=%s sectors=%s sector_counts=%s universe_size=%s subscription_id=%s stream_id=%s batch_max_records=%s"
+        % (
+            ",".join(markets),
+            ",".join(sector_keys) or "all",
+            sector_counts,
+            0 if universe is None else len(universe),
+            subscription_id,
+            buffer.stream_id,
+            buffer.batch_max_records,
+        )
+    )
+    return buffer
 
 
 def _drain_rpc_service(config):
@@ -539,9 +751,24 @@ def _schedule_adjust_if_needed(context_info, config):
         )
 
 
-def _record_adjust_tick():
+def _positive_float(value, default):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return result if result > 0 else float(default)
+
+
+def _record_adjust_tick(config=None):
     """Track and periodically log the real interval between adjust triggers."""
     stats = _adjust_tick_stats
+    cadence_config = dict((config or {}).get("adjust_cadence") or {})
+    window_seconds = _positive_float(cadence_config.get("window_seconds"), 10.0)
+    warn_threshold = _positive_float(
+        cadence_config.get("warn_threshold_seconds"),
+        1.0,
+    )
+    log_normal = _config_bool(cadence_config.get("log_normal"), True)
     now = time.time()
     last = stats["last_ts"]
     stats["last_ts"] = now
@@ -553,12 +780,33 @@ def _record_adjust_tick():
     stats["sum"] += delta
     stats["min"] = delta if stats["min"] <= 0 else min(stats["min"], delta)
     stats["max"] = max(stats["max"], delta)
-    if now - stats["window_start"] >= 10.0 and stats["count"] > 0:
+    if now - stats["window_start"] >= window_seconds and stats["count"] > 0:
         avg = stats["sum"] / stats["count"]
-        print(
-            "[bigqmt_signal_trader] adjust cadence: ticks=%d avg=%.3fs min=%.3fs max=%.3fs over %.0fs"
-            % (stats["count"], avg, stats["min"], stats["max"], now - stats["window_start"])
-        )
+        if stats["max"] >= warn_threshold:
+            print(
+                "[bigqmt_signal_trader] WARNING adjust cadence stalled: "
+                "ticks=%d avg=%.3fs min=%.3fs max=%.3fs over %.0fs threshold=%.3fs"
+                % (
+                    stats["count"],
+                    avg,
+                    stats["min"],
+                    stats["max"],
+                    now - stats["window_start"],
+                    warn_threshold,
+                )
+            )
+        elif log_normal:
+            print(
+                "[bigqmt_signal_trader] adjust cadence: "
+                "ticks=%d avg=%.3fs min=%.3fs max=%.3fs over %.0fs"
+                % (
+                    stats["count"],
+                    avg,
+                    stats["min"],
+                    stats["max"],
+                    now - stats["window_start"],
+                )
+            )
         stats.update({"count": 0, "sum": 0.0, "min": 0.0, "max": 0.0, "window_start": now})
 
 
@@ -620,6 +868,7 @@ def init(ContextInfo):
     _apply_gil_tuning()
     _start_latency_probe()
     config = _build_config()
+    _start_market_stream(ContextInfo, config)
     runtime = BigQmtRuntimeAdapter(ContextInfo)
     app = init_app(runtime, _build_app)
     _start_rpc_service(ContextInfo, app, config)
@@ -650,6 +899,14 @@ def _diag_startup(ContextInfo, config):
         print("[bigqmt_diag] rpc_service=running (type=%s)" % type(_rpc_service).__name__)
     else:
         print("[bigqmt_diag] rpc_service=NOT STARTED (check enable_rpc / errors above)")
+    if _market_stream_buffer is not None:
+        stream_status = _market_stream_buffer.status()
+        print(
+            "[bigqmt_diag] market_stream=running stream_id=%s latest_sequence=%s"
+            % (stream_status["stream_id"], stream_status["latest_sequence"])
+        )
+    else:
+        print("[bigqmt_diag] market_stream=disabled")
 
     # 2. Key QMT function bindings
     qmt_api = dict(config.get("qmt_api") or {})
@@ -723,8 +980,8 @@ def _adjust_phase(name, fn, *args):
 
 def adjust(ContextInfo):
     global _adjust_logged
-    _record_adjust_tick()
     config = _build_config()
+    _record_adjust_tick(config)
     _adjust_phase("drain", _drain_rpc_service, config)
     _adjust_phase("full_tick", _refresh_full_tick_cache, ContextInfo, config)
     _adjust_phase("download", _pump_download_jobs, ContextInfo, config)

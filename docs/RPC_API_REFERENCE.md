@@ -29,6 +29,7 @@
 ### `ping`
 - **参数**：无
 - **返回**：`{"pong": True, "account_id": "...", "server_time": "YYYY-MM-DD HH:MM:SS"}`
+- **账户环境**：`account_environment` 为节点绑定经当前会话核验后的 `broker_sim` / `live`，缺失或冲突为 JSON `null`。`allow_order_methods` 仅表示配置开关，不代表已具备写入条件；见[节点事实契约](BIG_QMT_REDIS_RPC.md#节点账户事实zbw-72)。
 - **用途**：探活、确认 RPC 服务在线与归属账号。
 - **实测延迟**：Redis ~13ms（p50）。
 
@@ -308,7 +309,7 @@
 
 ## 6. 下单 / 撤单（默认关闭）
 
-> ⚠️ 默认 `rpc_allow_order_methods=False`，调用会被 `PermissionError` 拒绝。确认账号/风控/接入方后，在配置里设 `"rpc_allow_order_methods": True` 开启。
+> 默认 `rpc_allow_order_methods=False`。显式开启后仍须节点绑定与当前会话一致且环境为 `broker_sim`；unknown/live、账号冲突和会话变化均拒绝下单/批量下单/撤单。
 
 ### `submit_order`
 - **别名**：`order_stock` / `order_stock_async`

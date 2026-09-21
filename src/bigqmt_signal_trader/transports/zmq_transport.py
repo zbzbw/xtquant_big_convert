@@ -24,6 +24,7 @@ import queue
 import threading
 import time
 import uuid
+import zlib
 
 from ..adapters.redis_common import decode_text
 from ..redis_rpc import (
@@ -40,6 +41,7 @@ from .base import RpcTransport, TransportError, TransportTimeout
 DEFAULT_ZMQ_HOST = "127.0.0.1"
 DEFAULT_ZMQ_BASE_PORT = 15560
 DEFAULT_ZMQ_PORT_RANGE = 100  # derived port = base + (account_id_int mod range)
+BINARY_JSON_ZLIB_PREFIX = b"BQZ1"
 
 
 def _default_zmq_port(account_id):
@@ -61,9 +63,38 @@ def _default_zmq_address(account_id, host=None):
 def _loads(raw):
     if isinstance(raw, dict):
         return dict(raw)
+    if isinstance(raw, (bytes, bytearray)) and raw.startswith(
+        BINARY_JSON_ZLIB_PREFIX
+    ):
+        return json.loads(
+            zlib.decompress(bytes(raw[len(BINARY_JSON_ZLIB_PREFIX):])).decode(
+                "utf-8"
+            )
+        )
     text = decode_text(raw)
     text = decode_rpc_request_payload(text)
     return json.loads(text)
+
+
+def _encode_response(
+    response,
+    *,
+    binary_enabled=True,
+    binary_threshold_bytes=4096,
+    compression_level=1
+):
+    if binary_enabled:
+        raw = json.dumps(
+            response,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(raw) >= int(binary_threshold_bytes):
+            return BINARY_JSON_ZLIB_PREFIX + zlib.compress(
+                raw,
+                int(compression_level),
+            )
+    return encode_rpc_request_payload(response).encode("utf-8")
 
 
 class ZmqTransport(RpcTransport):
@@ -94,6 +125,9 @@ class ZmqTransport(RpcTransport):
         discovery_key_template="bigqmt:zmq:addr:{account_id}",
         discovery_ttl_seconds=300,
         port_scan_range=50,
+        binary_response_enabled=True,
+        binary_response_threshold_bytes=4096,
+        binary_response_compression_level=1,
     ):
         super(ZmqTransport, self).__init__(account_id=account_id, print_prefix=print_prefix)
         # Address resolution order: explicit bind_address/connect_address win;
@@ -120,6 +154,19 @@ class ZmqTransport(RpcTransport):
         self.discovery_key_template = discovery_key_template
         self.discovery_ttl_seconds = int(discovery_ttl_seconds)
         self.port_scan_range = int(port_scan_range)
+        self.binary_response_enabled = bool(binary_response_enabled)
+        self.binary_response_threshold_bytes = int(
+            binary_response_threshold_bytes
+        )
+        self.binary_response_compression_level = int(
+            binary_response_compression_level
+        )
+        if self.binary_response_threshold_bytes <= 0:
+            raise ValueError("binary_response_threshold_bytes must be positive")
+        if not 0 <= self.binary_response_compression_level <= 9:
+            raise ValueError(
+                "binary_response_compression_level must be between 0 and 9"
+            )
 
         self._zmq = None  # imported lazily
         self._ctx = None
@@ -157,6 +204,15 @@ class ZmqTransport(RpcTransport):
             ),
             discovery_ttl_seconds=int(config.get("discovery_ttl_seconds", 300)),
             port_scan_range=int(config.get("port_scan_range", 50)),
+            binary_response_enabled=bool(
+                config.get("binary_response_enabled", True)
+            ),
+            binary_response_threshold_bytes=int(
+                config.get("binary_response_threshold_bytes", 4096)
+            ),
+            binary_response_compression_level=int(
+                config.get("binary_response_compression_level", 1)
+            ),
         )
 
     # -- shared zmq context -----------------------------------------------
@@ -332,7 +388,12 @@ class ZmqTransport(RpcTransport):
         if identity is None:
             # No matching peer — drop silently (client may have gone away).
             return
-        payload = encode_rpc_request_payload(response).encode("utf-8")
+        payload = _encode_response(
+            response,
+            binary_enabled=self.binary_response_enabled,
+            binary_threshold_bytes=self.binary_response_threshold_bytes,
+            compression_level=self.binary_response_compression_level,
+        )
         if self._router_thread is not None and threading.current_thread() is not self._router_thread:
             self._queued_response_count += 1
             if self._queued_response_count <= 5:

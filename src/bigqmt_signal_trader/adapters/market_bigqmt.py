@@ -212,6 +212,7 @@ class BigQmtMarketDataProvider:
         count = params.get("count", -1)
         dividend_type = params.get("dividend_type", "none")
         fill_data = params.get("fill_data", True)
+        subscribe = params.get("subscribe")
         data_dir = params.get("data_dir")
 
         mini_kwargs = {
@@ -233,6 +234,9 @@ class BigQmtMarketDataProvider:
             "count": count,
             "dividend_type": dividend_type,
         }
+        if subscribe is not None:
+            mini_kwargs["subscribe"] = bool(subscribe)
+            big_kwargs["subscribe"] = bool(subscribe)
         if method_name == "get_local_data" and data_dir is not None:
             mini_kwargs["data_dir"] = data_dir
             big_kwargs["data_dir"] = data_dir
@@ -243,6 +247,8 @@ class BigQmtMarketDataProvider:
             "count": count,
             "dividend_type": dividend_type,
         }
+        if subscribe is not None:
+            positional_tail_kwargs["subscribe"] = bool(subscribe)
         if method_name == "get_local_data" and data_dir is not None:
             positional_tail_kwargs["data_dir"] = data_dir
 
@@ -265,6 +271,7 @@ class BigQmtMarketDataProvider:
                     "end_time": end_time,
                     "count": count,
                     "dividend_type": dividend_type,
+                    **({"subscribe": bool(subscribe)} if subscribe is not None else {}),
                 },
             ),
             (
@@ -278,6 +285,7 @@ class BigQmtMarketDataProvider:
                     "count": count,
                     "dividend_type": dividend_type,
                     "fill_data": fill_data,
+                    **({"subscribe": bool(subscribe)} if subscribe is not None else {}),
                 },
             ),
         ]

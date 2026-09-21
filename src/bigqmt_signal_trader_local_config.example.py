@@ -18,6 +18,12 @@ BIGQMT_REDIS_CONFIG = {
     "password": "",
     # Keep order RPC disabled unless you explicitly want remote order/cancel.
     "rpc_allow_order_methods": False,
+    # Node operator binding pins account_id, account_environment and the
+    # session_id verified by the operator; never adopt it on service startup.
+    # The reader independently supplies CURRENT QMT session evidence.
+    # See docs/BIG_QMT_REDIS_RPC.md; absent inputs keep ping environment null.
+    "node_account_binding": None,
+    "session_facts_reader": None,
     # Redis and ZMQ can both drain requests through QMT's official
     # run_time("adjust", ...) callback. This avoids GIL stalls in QMT's process.
     "rpc_process_in_listener": True,
@@ -40,6 +46,16 @@ BIGQMT_REDIS_CONFIG = {
     # strategy thread (the in-flight demand always completes).
     "full_tick_refresh_max_wall_seconds": 0.3,
     "full_tick_max_requests": 8,
+    # Bridge ContextInfo.subscribe_whole_quote incremental callbacks into an
+    # ordered, gap-detectable RPC buffer for an external market recorder.
+    "market_stream_enabled": False,
+    "market_stream_markets": ("SH", "SZ"),
+    # Delivery recording must name the exact finite subscription. Leave empty
+    # only for the legacy whole-market/sector stream.
+    "market_stream_instruments": (),
+    "market_stream_max_batches": 20000,
+    "market_stream_max_records": 1000000,
+    "market_stream_batch_max_records": 1000,
     # Async download jobs: clients submit download_history_data(2) as a job; the
     # strategy thread downloads download_job_chunk_size symbols per tick (capped by
     # download_job_max_wall_seconds), so a long download never blocks the RPC pump.

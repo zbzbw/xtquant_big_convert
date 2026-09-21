@@ -86,6 +86,9 @@ SCHEDULE_ADJUST_ENABLED = True
 # queue wait for read RPCs. Verify on the live box that run_time honors sub-3s
 # intervals (see the adjust cadence log) before trusting a low value.
 SCHEDULE_ADJUST_INTERVAL = "500nMilliSecond"
+ADJUST_CADENCE_LOG_NORMAL = True
+ADJUST_CADENCE_WINDOW_SECONDS = 10.0
+ADJUST_CADENCE_WARN_THRESHOLD_SECONDS = 1.0
 FULL_TICK_CACHE_ENABLED = False
 FULL_TICK_DEMAND_TTL_SECONDS = 10
 FULL_TICK_CACHE_TTL_SECONDS = 10
@@ -96,6 +99,14 @@ FULL_TICK_MARKET_REFRESH_INTERVAL_SECONDS = 3.0
 # Wall-clock budget for one refresh round to avoid stalling the strategy thread.
 FULL_TICK_REFRESH_MAX_WALL_SECONDS = 0.3
 FULL_TICK_MAX_REQUESTS = 8
+# Native whole-market incremental quote callback bridge.
+MARKET_STREAM_ENABLED = False
+MARKET_STREAM_MARKETS = ("SH", "SZ")
+MARKET_STREAM_SECTORS = ()
+MARKET_STREAM_INSTRUMENTS = ()
+MARKET_STREAM_MAX_BATCHES = 20000
+MARKET_STREAM_MAX_RECORDS = 1000000
+MARKET_STREAM_BATCH_MAX_RECORDS = 1000
 # Async download jobs: the strategy thread drains one queued job at a time,
 # downloading DOWNLOAD_JOB_CHUNK_SIZE symbols per tick (capped by the wall-clock
 # budget), so a long download never blocks the RPC pump. chunk_size is the
@@ -140,6 +151,18 @@ SCHEDULE_ADJUST_ENABLED = bool(BIGQMT_REDIS_CONFIG.get("schedule_adjust", SCHEDU
 if not RPC_BACKGROUND_THREADS:
     SCHEDULE_ADJUST_ENABLED = True
 SCHEDULE_ADJUST_INTERVAL = str(BIGQMT_REDIS_CONFIG.get("schedule_adjust_interval", SCHEDULE_ADJUST_INTERVAL))
+ADJUST_CADENCE_LOG_NORMAL = bool(
+    BIGQMT_REDIS_CONFIG.get("adjust_cadence_log_normal", ADJUST_CADENCE_LOG_NORMAL)
+)
+ADJUST_CADENCE_WINDOW_SECONDS = float(
+    BIGQMT_REDIS_CONFIG.get("adjust_cadence_window_seconds", ADJUST_CADENCE_WINDOW_SECONDS)
+)
+ADJUST_CADENCE_WARN_THRESHOLD_SECONDS = float(
+    BIGQMT_REDIS_CONFIG.get(
+        "adjust_cadence_warn_threshold_seconds",
+        ADJUST_CADENCE_WARN_THRESHOLD_SECONDS,
+    )
+)
 FULL_TICK_CACHE_ENABLED = bool(BIGQMT_REDIS_CONFIG.get("full_tick_cache_enabled", FULL_TICK_CACHE_ENABLED))
 FULL_TICK_DEMAND_TTL_SECONDS = float(
     BIGQMT_REDIS_CONFIG.get("full_tick_demand_ttl_seconds", FULL_TICK_DEMAND_TTL_SECONDS)
@@ -157,6 +180,30 @@ FULL_TICK_REFRESH_MAX_WALL_SECONDS = float(
     BIGQMT_REDIS_CONFIG.get("full_tick_refresh_max_wall_seconds", FULL_TICK_REFRESH_MAX_WALL_SECONDS)
 )
 FULL_TICK_MAX_REQUESTS = int(BIGQMT_REDIS_CONFIG.get("full_tick_max_requests", FULL_TICK_MAX_REQUESTS))
+MARKET_STREAM_ENABLED = bool(
+    BIGQMT_REDIS_CONFIG.get("market_stream_enabled", MARKET_STREAM_ENABLED)
+)
+MARKET_STREAM_MARKETS = tuple(
+    BIGQMT_REDIS_CONFIG.get("market_stream_markets", MARKET_STREAM_MARKETS)
+)
+MARKET_STREAM_SECTORS = tuple(
+    BIGQMT_REDIS_CONFIG.get("market_stream_sectors", MARKET_STREAM_SECTORS)
+)
+MARKET_STREAM_INSTRUMENTS = tuple(
+    BIGQMT_REDIS_CONFIG.get("market_stream_instruments", MARKET_STREAM_INSTRUMENTS)
+)
+MARKET_STREAM_MAX_BATCHES = int(
+    BIGQMT_REDIS_CONFIG.get("market_stream_max_batches", MARKET_STREAM_MAX_BATCHES)
+)
+MARKET_STREAM_MAX_RECORDS = int(
+    BIGQMT_REDIS_CONFIG.get("market_stream_max_records", MARKET_STREAM_MAX_RECORDS)
+)
+MARKET_STREAM_BATCH_MAX_RECORDS = int(
+    BIGQMT_REDIS_CONFIG.get(
+        "market_stream_batch_max_records",
+        MARKET_STREAM_BATCH_MAX_RECORDS,
+    )
+)
 DOWNLOAD_JOBS_ENABLED = bool(BIGQMT_REDIS_CONFIG.get("download_jobs_enabled", DOWNLOAD_JOBS_ENABLED))
 DOWNLOAD_JOB_CHUNK_SIZE = int(BIGQMT_REDIS_CONFIG.get("download_job_chunk_size", DOWNLOAD_JOB_CHUNK_SIZE))
 DOWNLOAD_JOB_MAX_WALL_SECONDS = float(
@@ -176,10 +223,17 @@ def _apply_config(account_id):
     configure(
         mode="bigqmt",
         account_id=account_id,
+        node_account_binding=BIGQMT_REDIS_CONFIG.get("node_account_binding"),
+        session_facts_reader=BIGQMT_REDIS_CONFIG.get("session_facts_reader"),
         position_sync_type="redis" if RPC_TRANSPORT in ("redis", "", "default") else "",
         enable_rpc=True,
         schedule_adjust=SCHEDULE_ADJUST_ENABLED,
         schedule_adjust_interval=SCHEDULE_ADJUST_INTERVAL,
+        adjust_cadence={
+            "log_normal": ADJUST_CADENCE_LOG_NORMAL,
+            "window_seconds": ADJUST_CADENCE_WINDOW_SECONDS,
+            "warn_threshold_seconds": ADJUST_CADENCE_WARN_THRESHOLD_SECONDS,
+        },
         redis={
             "host": REDIS_HOST,
             "port": REDIS_PORT,
@@ -217,6 +271,15 @@ def _apply_config(account_id):
             "refresh_max_wall_seconds": FULL_TICK_REFRESH_MAX_WALL_SECONDS,
             "max_requests": FULL_TICK_MAX_REQUESTS,
         },
+        market_stream={
+            "enabled": MARKET_STREAM_ENABLED,
+            "markets": MARKET_STREAM_MARKETS,
+            "sectors": MARKET_STREAM_SECTORS,
+            "instruments": MARKET_STREAM_INSTRUMENTS,
+            "max_batches": MARKET_STREAM_MAX_BATCHES,
+            "max_records": MARKET_STREAM_MAX_RECORDS,
+            "batch_max_records": MARKET_STREAM_BATCH_MAX_RECORDS,
+        },
         download_jobs={
             "enabled": DOWNLOAD_JOBS_ENABLED,
             "account_id": account_id,
@@ -237,7 +300,7 @@ def configure_runtime_account(account_id):
 
 
 def configure_runtime_redis(redis_config):
-    global REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_USERNAME, REDIS_PASSWORD, RPC_ALLOW_ORDER_METHODS, RPC_PROCESS_IN_LISTENER, RPC_BACKGROUND_THREADS, RPC_LISTENER_METHODS, SCHEDULE_ADJUST_ENABLED, SCHEDULE_ADJUST_INTERVAL, FULL_TICK_CACHE_ENABLED, FULL_TICK_DEMAND_TTL_SECONDS, FULL_TICK_CACHE_TTL_SECONDS, FULL_TICK_REFRESH_INTERVAL_SECONDS, FULL_TICK_MARKET_REFRESH_INTERVAL_SECONDS, FULL_TICK_REFRESH_MAX_WALL_SECONDS, FULL_TICK_MAX_REQUESTS, RPC_TRANSPORT, RPC_ZMQ_CONFIG, RPC_MYSQL_CONFIG, DOWNLOAD_JOBS_ENABLED, DOWNLOAD_JOB_CHUNK_SIZE, DOWNLOAD_JOB_MAX_WALL_SECONDS, DOWNLOAD_JOB_TTL_SECONDS, EXEC_EVENTS_ENABLED, EXEC_EVENTS_DEBUG_RAW_FIELDS
+    global REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_USERNAME, REDIS_PASSWORD, RPC_ALLOW_ORDER_METHODS, RPC_PROCESS_IN_LISTENER, RPC_BACKGROUND_THREADS, RPC_LISTENER_METHODS, SCHEDULE_ADJUST_ENABLED, SCHEDULE_ADJUST_INTERVAL, ADJUST_CADENCE_LOG_NORMAL, ADJUST_CADENCE_WINDOW_SECONDS, ADJUST_CADENCE_WARN_THRESHOLD_SECONDS, FULL_TICK_CACHE_ENABLED, FULL_TICK_DEMAND_TTL_SECONDS, FULL_TICK_CACHE_TTL_SECONDS, FULL_TICK_REFRESH_INTERVAL_SECONDS, FULL_TICK_MARKET_REFRESH_INTERVAL_SECONDS, FULL_TICK_REFRESH_MAX_WALL_SECONDS, FULL_TICK_MAX_REQUESTS, MARKET_STREAM_ENABLED, MARKET_STREAM_MARKETS, MARKET_STREAM_SECTORS, MARKET_STREAM_INSTRUMENTS, MARKET_STREAM_MAX_BATCHES, MARKET_STREAM_MAX_RECORDS, MARKET_STREAM_BATCH_MAX_RECORDS, RPC_TRANSPORT, RPC_ZMQ_CONFIG, RPC_MYSQL_CONFIG, DOWNLOAD_JOBS_ENABLED, DOWNLOAD_JOB_CHUNK_SIZE, DOWNLOAD_JOB_MAX_WALL_SECONDS, DOWNLOAD_JOB_TTL_SECONDS, EXEC_EVENTS_ENABLED, EXEC_EVENTS_DEBUG_RAW_FIELDS
     redis_config = dict(redis_config or {})
     REDIS_HOST = redis_config.get("host", REDIS_HOST)
     REDIS_PORT = int(redis_config.get("port", REDIS_PORT))
@@ -264,6 +327,21 @@ def configure_runtime_redis(redis_config):
     if not RPC_BACKGROUND_THREADS:
         SCHEDULE_ADJUST_ENABLED = True
     SCHEDULE_ADJUST_INTERVAL = str(redis_config.get("schedule_adjust_interval", SCHEDULE_ADJUST_INTERVAL))
+    ADJUST_CADENCE_LOG_NORMAL = bool(
+        redis_config.get("adjust_cadence_log_normal", ADJUST_CADENCE_LOG_NORMAL)
+    )
+    ADJUST_CADENCE_WINDOW_SECONDS = float(
+        redis_config.get(
+            "adjust_cadence_window_seconds",
+            ADJUST_CADENCE_WINDOW_SECONDS,
+        )
+    )
+    ADJUST_CADENCE_WARN_THRESHOLD_SECONDS = float(
+        redis_config.get(
+            "adjust_cadence_warn_threshold_seconds",
+            ADJUST_CADENCE_WARN_THRESHOLD_SECONDS,
+        )
+    )
     FULL_TICK_CACHE_ENABLED = bool(redis_config.get("full_tick_cache_enabled", FULL_TICK_CACHE_ENABLED))
     FULL_TICK_DEMAND_TTL_SECONDS = float(
         redis_config.get("full_tick_demand_ttl_seconds", FULL_TICK_DEMAND_TTL_SECONDS)
@@ -279,6 +357,30 @@ def configure_runtime_redis(redis_config):
         redis_config.get("full_tick_refresh_max_wall_seconds", FULL_TICK_REFRESH_MAX_WALL_SECONDS)
     )
     FULL_TICK_MAX_REQUESTS = int(redis_config.get("full_tick_max_requests", FULL_TICK_MAX_REQUESTS))
+    MARKET_STREAM_ENABLED = bool(
+        redis_config.get("market_stream_enabled", MARKET_STREAM_ENABLED)
+    )
+    MARKET_STREAM_MARKETS = tuple(
+        redis_config.get("market_stream_markets", MARKET_STREAM_MARKETS)
+    )
+    MARKET_STREAM_SECTORS = tuple(
+        redis_config.get("market_stream_sectors", MARKET_STREAM_SECTORS)
+    )
+    MARKET_STREAM_INSTRUMENTS = tuple(
+        redis_config.get("market_stream_instruments", MARKET_STREAM_INSTRUMENTS)
+    )
+    MARKET_STREAM_MAX_BATCHES = int(
+        redis_config.get("market_stream_max_batches", MARKET_STREAM_MAX_BATCHES)
+    )
+    MARKET_STREAM_MAX_RECORDS = int(
+        redis_config.get("market_stream_max_records", MARKET_STREAM_MAX_RECORDS)
+    )
+    MARKET_STREAM_BATCH_MAX_RECORDS = int(
+        redis_config.get(
+            "market_stream_batch_max_records",
+            MARKET_STREAM_BATCH_MAX_RECORDS,
+        )
+    )
     DOWNLOAD_JOBS_ENABLED = bool(redis_config.get("download_jobs_enabled", DOWNLOAD_JOBS_ENABLED))
     DOWNLOAD_JOB_CHUNK_SIZE = int(redis_config.get("download_job_chunk_size", DOWNLOAD_JOB_CHUNK_SIZE))
     DOWNLOAD_JOB_MAX_WALL_SECONDS = float(

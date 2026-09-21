@@ -21,12 +21,19 @@ from .code_utils import normalize_stock_code
 from .models import AccountSnapshot, OrderRef, OrderRequest
 
 
-RPC_REVISION = "20260715-execution-snapshot-v1"
+RPC_REVISION = "20260920-market-stream-v3"
+
+
+JSON_READY_METHODS = {
+    "drain_market_stream",
+}
 
 
 READ_METHODS = {
     "ping",
     "get_ticks",
+    "get_market_stream_status",
+    "drain_market_stream",
     "get_instrument",
     "get_instrument_type",
     "get_market_data",
@@ -108,6 +115,12 @@ QUOTE_SUBSCRIPTION_METHODS = {
 }
 
 LISTENER_DEFERRED_METHODS = {
+    # Large stream responses are expensive to normalize and encode. QMT gives
+    # its background Python thread too little runtime for that work, producing
+    # multi-second stalls despite low process CPU. The scheduled strategy
+    # thread runs every 100ms and completes the same work without starvation.
+    "get_market_stream_status",
+    "drain_market_stream",
     "sync_positions",
     # Trade-context queries route through QMT's get_trade_detail_data, which
     # returns EMPTY when called from the background RPC thread (it needs the main
@@ -350,9 +363,12 @@ class BigQmtRpcHandlers:
         position_provider,
         order_gateway=None,
         position_sync_sink=None,
+        market_stream=None,
         allow_order_methods=False,
         allowed_methods=None,
         qmt_api=None,
+        node_account_binding=None,
+        session_facts_reader=None,
         quote_subscription_manager=None,
     ):
         self.account_id = str(account_id or "")
@@ -360,11 +376,17 @@ class BigQmtRpcHandlers:
         self.position_provider = position_provider
         self.order_gateway = order_gateway
         self.position_sync_sink = position_sync_sink
+        self.market_stream = market_stream
         self.allow_order_methods = bool(allow_order_methods)
         self.quote_subscription_manager = quote_subscription_manager
         # QMT runtime-injected global functions (passorder/get_trade_detail_data/
         # 融资融券查询等)。由 strategy._build_config 解析注入。
         self.qmt_api = dict(qmt_api or {})
+        # Node-owned inputs only: never populated from RPC parameters.
+        self._node_account_binding = dict(node_account_binding or {})
+        self._session_facts_reader = session_facts_reader
+        self._binding_invalidated = False
+        self._account_environment()
         self._submit_journal = {}
         # Server-side diagnostic for silent failures (e.g. passorder submitted
         # but order not found in system). Surfaced to client via server_error.
@@ -376,6 +398,52 @@ class BigQmtRpcHandlers:
             self.allowed_methods = allowed
         else:
             self.allowed_methods = {str(method) for method in allowed_methods}
+
+    def _account_environment(self):
+        if self._binding_invalidated:
+            return None
+        binding = self._node_account_binding
+        try:
+            facts = self._session_facts_reader()
+            account_id = facts.get("account_id")
+            session_id = facts.get("session_id")
+            # The operator-verified binding pins the session generation.
+            # Rebuilding a handler must never adopt the reader's first value.
+            if (not isinstance(account_id, str) or not account_id
+                    or not isinstance(session_id, str) or not session_id
+                    or session_id != binding.get("session_id")
+                    or account_id != self.account_id
+                    or account_id != binding.get("account_id")
+                    or binding.get("account_environment") not in ("broker_sim", "live")):
+                raise ValueError("missing or conflicting node account facts")
+        except Exception:
+            # A reconnect, identity change or loss of evidence requires a new
+            # node binding/handler; restoring an old session cannot rearm it.
+            self._binding_invalidated = True
+            return None
+        return binding["account_environment"]
+
+    def _check_order_account(self, params):
+        if self._request_account_id(params) != self.account_id:
+            raise PermissionError("account_id mismatch")
+        # Reject conflicting aliases even when account_id takes precedence.
+        account = params.get("account")
+        if isinstance(account, dict):
+            for key in ("account_id", "accountID", "id"):
+                if account.get(key) is not None and str(account[key]) != self.account_id:
+                    raise PermissionError("account_id mismatch")
+        elif account is not None and str(account) != self.account_id:
+            raise PermissionError("account_id mismatch")
+
+    def _require_order_environment(self, params):
+        if not self.allow_order_methods:
+            raise PermissionError("order rpc methods are disabled")
+        self._check_order_account(params)
+        if self._account_environment() != "broker_sim":
+            raise PermissionError("verified broker_sim node account is required")
+        gateway_account = getattr(self.order_gateway, "account_id", self.account_id)
+        if gateway_account != self.account_id:
+            raise PermissionError("order gateway account_id mismatch")
 
     def _request_account_id(self, params):
         params = params or {}
@@ -408,13 +476,17 @@ class BigQmtRpcHandlers:
         return handler(params)
 
     def _handle_ping(self, params):
-        return {
+        result = {
             "pong": True,
             "account_id": self.account_id,
+            "account_environment": self._account_environment(),
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
             "server_time": _dt.datetime.now(),
         }
+        if self.market_stream is not None:
+            result["market_stream"] = self.market_stream.status()
+        return result
 
     # ------------------------------------------------------------------
     # 全推行情订阅控制（引用计数共享 ContextInfo.subscribe_whole_quote）。
@@ -469,6 +541,26 @@ class BigQmtRpcHandlers:
         if not codes:
             raise ValueError("codes or code is required")
         return self.market_data.get_ticks(codes)
+
+    def _require_market_stream(self):
+        if self.market_stream is None:
+            raise RuntimeError("whole-market quote stream is disabled")
+        return self.market_stream
+
+    def _handle_get_market_stream_status(self, params):
+        return self._require_market_stream().status()
+
+    def _handle_drain_market_stream(self, params):
+        stream = self._require_market_stream()
+        expected_stream_id = str(params.get("stream_id") or "")
+        if expected_stream_id and expected_stream_id != stream.stream_id:
+            raise RuntimeError("market stream identity changed")
+        return stream.drain(
+            after_sequence=int(params.get("after_sequence") or 0),
+            max_batches=int(params.get("max_batches") or 200),
+            max_records=int(params.get("max_records") or 100000),
+            copy_batches=False,
+        )
 
     def _handle_get_instrument(self, params):
         code = params.get("code")
@@ -705,6 +797,7 @@ class BigQmtRpcHandlers:
         raise ValueError("action or order_type is required")
 
     def _handle_submit_order(self, params):
+        self._require_order_environment(params)
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
         price = params.get("price")
@@ -752,11 +845,14 @@ class BigQmtRpcHandlers:
         return result
 
     def _handle_submit_orders_batch(self, params):
+        self._require_order_environment(params)
         orders = params.get("orders") or []
         if not isinstance(orders, list) or not orders:
             raise ValueError("orders must be a non-empty list")
         if len(orders) > 500:
             raise ValueError("orders exceeds batch limit 500")
+        for item in orders:
+            self._check_order_account(dict(item or {}))
         batch_id = str(params.get("batch_id") or uuid.uuid4().hex)
         account_id = self._request_account_id(params)
         strategy_name = str(
@@ -861,6 +957,7 @@ class BigQmtRpcHandlers:
         return results
 
     def _handle_cancel_order(self, params):
+        self._require_order_environment(params)
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
         order_sys_id = str(params.get("order_sys_id") or params.get("order_sysid") or params.get("order_id") or "")
@@ -1202,7 +1299,16 @@ class RedisPubSubRpcService:
             if self.account_id and account_id and account_id != self.account_id:
                 raise PermissionError("account_id mismatch")
             result = self.handlers.handle(method, request.get("params") or {})
-            response["data"] = to_jsonable(result)
+            canonical_method = getattr(
+                self.handlers,
+                "_canonical_method",
+                lambda value: value,
+            )(method)
+            response["data"] = (
+                result
+                if canonical_method in JSON_READY_METHODS
+                else to_jsonable(result)
+            )
             response["ok"] = True
             # Surface server-side diagnostics when the handler recorded one.
             server_error = getattr(self.handlers, "_last_server_error", None)

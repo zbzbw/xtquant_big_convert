@@ -49,6 +49,32 @@ class FakeHistoryContext(FakeContext):
         return False
 
 
+class FakeMarketStreamContext(FakeContext):
+    def __init__(self):
+        super().__init__()
+        self.subscription_markets = []
+        self.market_callback = None
+        self.unsubscribed = []
+        self.sector_requests = []
+
+    def subscribe_whole_quote(self, markets, callback):
+        self.subscription_markets.append(list(markets))
+        self.market_callback = callback
+        return 7
+
+    def unsubscribe_quote(self, subscription_id):
+        self.unsubscribed.append(subscription_id)
+
+    def get_stock_list_in_sector(self, sector_name, real_timetag=-1):
+        self.sector_requests.append((sector_name, real_timetag))
+        values = {
+            "\u6caa\u6df1A\u80a1": ["600000.SH", "000001.SZ"],
+            "\u6caa\u6df1ETF": ["510050.SH"],
+            "\u6caa\u6df1\u6307\u6570": ["000001.SH"],
+        }
+        return values.get(sector_name, [])
+
+
 class FakeRpcService:
     def __init__(self):
         self.drained = []
@@ -124,6 +150,162 @@ class BigQmtStrategyRunnerTest(unittest.TestCase):
 
         self.assertEqual(rpc_service.drained, [20])
         self.assertEqual(self.app.ticks, [])
+
+    def test_adjust_cadence_can_suppress_normal_summary(self):
+        config = {
+            "adjust_cadence": {
+                "log_normal": False,
+                "window_seconds": 1.0,
+                "warn_threshold_seconds": 2.0,
+            }
+        }
+        with mock.patch.object(
+            strategy_module.time,
+            "time",
+            side_effect=(100.0, 100.1, 101.1),
+        ):
+            with mock.patch("builtins.print") as print_mock:
+                for _ in range(3):
+                    strategy_module._record_adjust_tick(config)
+
+        print_mock.assert_not_called()
+
+    def test_adjust_cadence_preserves_stall_warning(self):
+        config = {
+            "adjust_cadence": {
+                "log_normal": False,
+                "window_seconds": 1.0,
+                "warn_threshold_seconds": 0.5,
+            }
+        }
+        with mock.patch.object(
+            strategy_module.time,
+            "time",
+            side_effect=(100.0, 100.1, 101.1),
+        ):
+            with mock.patch("builtins.print") as print_mock:
+                for _ in range(3):
+                    strategy_module._record_adjust_tick(config)
+
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertIn("WARNING adjust cadence stalled", print_mock.call_args[0][0])
+
+    def test_market_stream_bridges_whole_quote_callback(self):
+        context = FakeMarketStreamContext()
+
+        stream = strategy_module._start_market_stream(
+            context,
+            {
+                "market_stream": {
+                    "enabled": True,
+                    "markets": ("SH", "SZ"),
+                    "max_batches": 10,
+                    "max_records": 100,
+                    "batch_max_records": 2,
+                }
+            },
+        )
+        context.market_callback(
+            {
+                "600000.SH": {"time": 1},
+                "600001.SH": {"time": 1},
+                "600002.SH": {"time": 1},
+            }
+        )
+        context.market_callback({"000001.SZ": {"time": 1}})
+        context.market_callback({"600000.SH": {"time": 2}})
+        result = stream.drain(after_sequence=0)
+
+        self.assertEqual(context.subscription_markets, [["SH", "SZ"]])
+        self.assertEqual(result["next_sequence"], 4)
+        self.assertEqual(result["batches"][0]["records"]["600000.SH"]["time"], 1)
+        self.assertEqual(
+            [batch["is_bootstrap"] for batch in result["batches"]],
+            [True, True, True, False],
+        )
+        self.assertEqual(
+            [batch["callback_sequence"] for batch in result["batches"]],
+            [1, 1, 2, 3],
+        )
+
+        strategy_module.reset_app()
+
+        self.assertEqual(context.unsubscribed, [7])
+
+    def test_market_stream_requires_native_whole_quote_api(self):
+        with self.assertRaisesRegex(RuntimeError, "subscribe_whole_quote"):
+            strategy_module._start_market_stream(
+                FakeContext(),
+                {"market_stream": {"enabled": True}},
+            )
+
+    def test_market_stream_filters_callbacks_to_configured_sectors(self):
+        context = FakeMarketStreamContext()
+
+        stream = strategy_module._start_market_stream(
+            context,
+            {
+                "market_stream": {
+                    "enabled": True,
+                    "markets": ("SH", "SZ"),
+                    "sectors": ("cn_a_share", "cn_etf", "cn_index"),
+                    "max_batches": 10,
+                    "max_records": 100,
+                    "batch_max_records": 10,
+                }
+            },
+        )
+        context.market_callback(
+            {
+                "600000.SH": {"time": 1},
+                "000001.SZ": {"time": 1},
+                "510050.SH": {"time": 1},
+                "000001.SH": {"time": 1},
+                "204001.SH": {"time": 1},
+            }
+        )
+
+        result = stream.drain(after_sequence=0)
+        records = {
+            code
+            for batch in result["batches"]
+            for code in batch["records"]
+        }
+
+        self.assertEqual(
+            records,
+            {"600000.SH", "000001.SZ", "510050.SH", "000001.SH"},
+        )
+        self.assertEqual(result["universe_size"], 4)
+        self.assertEqual(result["filtered_records"], 1)
+
+    def test_market_stream_binds_exact_instrument_identity(self):
+        context = FakeMarketStreamContext()
+        stream = strategy_module._start_market_stream(
+            context,
+            {"market_stream": {
+                "enabled": True,
+                "markets": ("SH", "SZ"),
+                "instruments": ("000001.SZ", "600000.SH", "000001.SZ"),
+                "max_batches": 10,
+                "max_records": 100,
+            }},
+        )
+        context.market_callback({
+            "600000.SH": {"time": 1},
+            "000001.SZ": {"time": 1},
+            "600001.SH": {"time": 1},
+        })
+
+        status = stream.status()
+        result = stream.drain(after_sequence=0)
+
+        self.assertEqual(status["universe_size"], 2)
+        self.assertEqual(
+            {code for batch in result["batches"] for code in batch["records"]},
+            {"000001.SZ", "600000.SH"},
+        )
+        self.assertEqual(status["subscription_identity"], status["universe_identity"])
 
     def test_zmq_rpc_build_does_not_create_redis_clients(self):
         config = {

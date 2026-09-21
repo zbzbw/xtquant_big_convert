@@ -260,7 +260,7 @@ class OrderSnapshot:
 
 class TradeSnapshot:
     def __init__(self, trade_id, order_sys_id, stock_code, action, volume, price,
-                 traded_at="", user_order_id=""):
+                 traded_at="", user_order_id="", commission=None, amount=None):
         self.trade_id = trade_id
         self.order_sys_id = order_sys_id
         self.stock_code = stock_code
@@ -269,6 +269,8 @@ class TradeSnapshot:
         self.price = price
         self.traded_at = traded_at
         self.user_order_id = user_order_id
+        self.commission = commission
+        self.amount = amount
 
 
 class OrderRef:

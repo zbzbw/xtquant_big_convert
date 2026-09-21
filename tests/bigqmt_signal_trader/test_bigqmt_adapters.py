@@ -223,6 +223,8 @@ class BigQmtAdaptersTest(unittest.TestCase):
                     m_nOffsetFlag=48,
                     m_nVolume=100,
                     m_dPrice=54.76,
+                    m_dComssion=5.12,
+                    m_dTradeAmount=5476.0,
                     m_strTradeTime="130524",
                     m_strRemark="",
                 )
@@ -241,6 +243,8 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(trades[0].action, "BUY")
         self.assertEqual(trades[0].volume, 100)
         self.assertEqual(trades[0].price, 54.76)
+        self.assertEqual(trades[0].commission, 5.12)
+        self.assertEqual(trades[0].amount, 5476.0)
 
     def test_factory_bigqmt_mode_wires_real_adapters(self):
         app = build_app(

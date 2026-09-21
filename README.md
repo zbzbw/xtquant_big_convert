@@ -711,7 +711,7 @@ python test_all_apis.py
 
 ## 安全默认值
 
-- `rpc_allow_order_methods` 默认 `False`：远程 `order_stock` / `cancel_order` 被拒绝。确认接入方、账号、风控后再显式开启。
+- `rpc_allow_order_methods` 默认 `False`。开启后，下单/撤单仍要求[节点绑定与当前会话事实](docs/BIG_QMT_REDIS_RPC.md#节点账户事实zbw-72)一致且为 `broker_sim`；unknown/live 均拒绝。
 - 回测桥接永久 `live_ready=false`，协议中没有真实账户和实盘下单方法。
 - 配置文件含资金账号和密码，`bigqmt_signal_trader_local_config.py` / `bigqmt_signal_trader_client_config.py` 已在 `.gitignore`，**不要提交**。
 - 请求负载经过 base64 + 数字混淆编码（`encode_rpc_request_payload`），避免 QMT 的 Redis 客户端拦截含股票代码的明文。
