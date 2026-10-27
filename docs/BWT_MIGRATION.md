@@ -1,6 +1,6 @@
 # BWT converter migration (ZBW-74)
 
-The candidate is `0.3.75+bwt.2`, based on upstream main as read on
+The candidate is `0.3.75+bwt.3`, based on upstream main as read on
 2026-10-27. The latest upstream GitHub release is `v0.3.73`; main additionally
 contains the 0.3.74 forming daily-bar fix and 0.3.75 MultiIndex serialization
 fix. The previous BWT vendor package declared `0.2.0` and included changes
@@ -25,6 +25,7 @@ are relative to the BWT repository.
 | BQZ1 response compression | Retain for existing callers | The current embedded script explicitly configures compression, and BWT's provider uses the matching converter ZMQ transport. Upstream typed-payload detection also runs after decompression. This does not select ZMQ for a new deployment. |
 | Verified node account/session facts (ZBW-72) | Retain and apply to new order methods | `native/provider.py` and the Live consumer rely on truthful `ping.account_environment`. Missing, conflicting or changed node evidence leaves it unknown and refuses writes. Newly added raw `passorder` and batch cancellation obey the same broker_sim restriction; batch item accounts cannot escape the node account. |
 | Exact recording subscription facts (ZBW-87) | Retain | `recording/recorder.py` checks schema v3 subscription/universe identities, activity and start time. Keep the existing identity representation for persisted consumers; this migration does not create a new identity format. |
+| Named Pipe request cancellation (ZBW-175 counterexamples) | Correct upstream transport | A request larger than the pipe buffer can block in `WriteFile`. One monotonic deadline covers connection, write and read; the existing `CancelIoEx` entry cancels pending I/O. Stop waits for active client I/O to exit before closing its handles. Failed/cancelled writes propagate without reconnect/resend because delivery is uncertain. A later explicit call may reconnect after failure; a stopped instance rejects new calls and the existing client close path creates a fresh transport. Server workers handle cancelled/closed writes and release their handles. |
 
 The converter buffer is a bounded in-memory source for recording. It neither
 writes a Data Lake nor requires successful Data publication before it can run.
@@ -84,6 +85,14 @@ selection and runtime forwarding remain upstream implementations. The BWT
 cursor handlers are transport-independent, so they can be exercised over Pipe
 without redesigning recording. The `shm_transport.py` implementation remains an
 explicit unsupported placeholder.
+
+The `bwt.3` correction follows synthetic Windows counterexamples from ZBW-175.
+It uses the existing synchronous transport and cancellation entry, with no BWT
+request retry. Deadline cancellation continues until the request leaves native
+I/O so cancellation between write/read calls cannot be lost. Tests collect
+request outcomes and server worker failures, including blocked requests and
+responses larger than 3 MiB. This is local transport validation; target QMT
+loading and site adoption still belong to the downstream tasks.
 
 ZBW-174 recommends Pipe requests with the existing bounded cursor reads after
 reproducing slow-consumer blocking in direct push. ZBW-175 owns product

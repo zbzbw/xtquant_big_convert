@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,17 +62,13 @@ class ThreadExitReleaseTest(unittest.TestCase):
         return server, client
 
     def _churn(self, client, count):
-        def worker(i):
-            client.send_request(
-                {"request_id": "t%d" % i, "method": "p", "params": {}}, 5)
-
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
-        for t in threads:
-            self.assertFalse(t.is_alive(), "请求线程没出来，别在卡死状态下做断言")
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            pending = [pool.submit(client.send_request,
+                       {"request_id": "t%d" % i, "method": "p", "params": {}}, 5)
+                       for i in range(count)]
+            replies = [future.result(timeout=10) for future in pending]
+        self.assertEqual({reply["request_id"] for reply in replies},
+                         {"t%d" % i for i in range(count)})
 
     def test_dead_threads_connections_are_released_on_both_sides(self):
         server, client = self._pair("bigqmt_test_431_exit")
@@ -88,23 +85,17 @@ class ThreadExitReleaseTest(unittest.TestCase):
     def test_drain_mode_server_recycles_the_connection_too(self):
         """drain 模式没有工作线程，泄漏落在 _drain_handles 里，同一个根因。"""
         server, client = self._pair("bigqmt_test_431_drain", background=False)
-        done = []
-
-        def worker(i):
-            client.send_request(
-                {"request_id": "t%d" % i, "method": "p", "params": {}}, 10)
-            done.append(i)
-
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
-        for t in threads:
-            t.start()
-        # 没人 drain 就没人回答 —— 本测试扮演 adjust 线程持续轮询。
-        self.assertTrue(
-            _wait_for(lambda: (server.drain_request_queue(max_items=5),
-                               len(done) == 3)[1], 10),
-            "drain 轮询下请求没被回答")
-        for t in threads:
-            t.join(timeout=30)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            pending = [pool.submit(client.send_request,
+                       {"request_id": "t%d" % i, "method": "p", "params": {}}, 10)
+                       for i in range(3)]
+            # 没人 drain 就没人回答 —— 本测试扮演 adjust 线程持续轮询。
+            self.assertTrue(
+                _wait_for(lambda: (server.drain_request_queue(max_items=5),
+                                   all(future.done() for future in pending))[1], 10),
+                "drain 轮询下请求没被回答")
+            replies = [future.result(timeout=1) for future in pending]
+        self.assertEqual({reply["request_id"] for reply in replies}, {"t0", "t1", "t2"})
         self.assertTrue(_wait_for(lambda: not client._client_threads, 5))
 
         def drained():
