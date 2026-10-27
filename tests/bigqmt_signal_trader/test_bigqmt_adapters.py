@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 
 
@@ -10,6 +11,7 @@ from bigqmt_signal_trader.adapter_factory import build_app
 from bigqmt_signal_trader.adapters.market_bigqmt import BigQmtMarketDataProvider
 from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
 from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+from bigqmt_signal_trader.adapters.position_bigqmt import _full_code
 from bigqmt_signal_trader.models import OrderRef, OrderRequest
 
 
@@ -74,6 +76,36 @@ class FakeMarketDataFallbackContext(FakeContext):
 
 
 class BigQmtAdaptersTest(unittest.TestCase):
+
+    def test_position_code_keeps_future_contract_code(self):
+        # A futures row always carries the XunTou-short exchange token, so a
+        # bare contract with an empty exchange is not futures -- normalize it
+        # and let an unrecognizable code raise as malformed.
+        with self.assertRaises(ValueError):
+            _full_code("EG2609", "")
+        with self.assertRaises(ValueError):
+            _full_code("IF2609", "")
+        self.assertEqual(_full_code("600000", "SH"), "600000.SH")
+
+    def test_futures_exchange_short_token_appends_suffix_and_preserves_case(self):
+        """Futures are classified by the exchange field (XunTou-short token),
+        which is appended as the suffix. The symbol keeps the exchange's exact
+        case (e.g. rb2401.SF lower, AP401.ZF upper) and must not be rewritten."""
+        self.assertEqual(_full_code("rb2401", "SF"), "rb2401.SF")   # SHFE lower-case
+        self.assertEqual(_full_code("AP401", "ZF"), "AP401.ZF")     # CZCE upper-case
+        self.assertEqual(_full_code("a2609", "DF"), "a2609.DF")     # DCE lower-case
+        self.assertEqual(_full_code("sc2401", "INE"), "sc2401.INE") # INE lower-case
+        self.assertEqual(_full_code("IF2609", "IF"), "IF2609.IF")   # CFFEX
+        self.assertEqual(_full_code("GF2609", "GF"), "GF2609.GF")   # GFEX
+
+    def test_futures_display_exchange_id_raises(self):
+        """A counter display ID (DCE/CFFEX/...) is an unexpected path: POSITION
+        rows normally carry the XunTou-short token (DF/SF/...), so this signals
+        a structure/vendor mismatch and must surface rather than degrade."""
+        for exchange in ("DCE", "CFFEX"):
+            with self.assertRaises(ValueError):
+                _full_code("EG2609", exchange)
+
     def test_market_provider_normalizes_codes_before_context_call(self):
         context = FakeContext()
         provider = BigQmtMarketDataProvider(context)
@@ -85,6 +117,253 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(context.tick_codes, [["600000.SH"]])
         self.assertEqual(context.instrument_codes, ["000001.SZ"])
         self.assertEqual(instrument["InstrumentStatus"], 0)
+
+    def test_get_instrument_prefers_native_sdk(self):
+        """issue #405: the terminal-side ContextInfo store can serve a poisoned
+        contract table (OpenDate=0 / renamed-on dates) while the machine's
+        miniQMT quote service answers the correct rows. When the native SDK is
+        reachable it must win -- it is the miniQMT client, so parity holds by
+        construction."""
+        context = FakeContext()
+        native = Obj()
+        native.get_instrument_detail = lambda code: {"OpenDate": 20070925}
+        provider = BigQmtMarketDataProvider(context, native_xtdata=native)
+
+        data = provider.get_instrument("601939.SH")
+
+        self.assertEqual(data["OpenDate"], 20070925)
+        self.assertEqual(context.instrument_codes, [])  # ContextInfo not consulted
+
+    def test_get_instrument_falls_back_to_context_when_native_dies(self):
+        """issue #160 semantics: with no reachable quote service the native call
+        raises, the dead-mark window caches the failure, and ContextInfo answers
+        (the pre-#405 behavior, unchanged for machines without a co-running
+        miniQMT)."""
+        context = FakeContext()
+
+        def boom(code):
+            raise RuntimeError("无法连接xtquant服务")
+
+        native = Obj()
+        native.get_instrument_detail = boom
+        provider = BigQmtMarketDataProvider(context, native_xtdata=native)
+
+        first = provider.get_instrument("sz000001")
+        second = provider.get_instrument("sz000001")
+
+        self.assertEqual(first["InstrumentStatus"], 0)
+        self.assertEqual(second["InstrumentStatus"], 0)
+        self.assertEqual(context.instrument_codes, ["000001.SZ", "000001.SZ"])
+        # window active: the dead native path must not be re-dialled
+        self.assertTrue(
+            provider._native_known_dead("get_instrument_detail")
+        )
+
+    def test_get_instrument_native_absent_uses_context_directly(self):
+        """native_xtdata=None and the flag off -> _native() is None, the
+        ContextInfo path answers directly (no attribute probing)."""
+        context = FakeContext()
+        provider = BigQmtMarketDataProvider(context)
+        provider.native_xtdata_enabled = False
+
+        data = provider.get_instrument("sz000001")
+
+        self.assertEqual(context.instrument_codes, ["000001.SZ"])
+        self.assertEqual(data["InstrumentStatus"], 0)
+
+    def test_get_ticks_keys_keep_the_caller_case_for_futures(self):
+        """issue #58: futures instrument codes are lower-case ('rb2708.SF'), but
+        the keys came back upper-cased, so `code in result` failed for every
+        futures code and the book looked missing."""
+        class EchoContext:
+            def __init__(self):
+                self.tick_codes = []
+
+            def get_full_tick(self, codes):
+                self.tick_codes.append(list(codes))
+                return dict((c, {"lastPrice": 1.0}) for c in codes)
+
+        context = EchoContext()
+        provider = BigQmtMarketDataProvider(context)
+
+        ticks = provider.get_ticks(["rb2708.SF", "a2609.DF"])
+
+        # QMT is asked in the caller's own spelling now. Upper-casing here was
+        # what kept the #95 fix from reaching get_full_tick: "rb2610.SF" arrived
+        # as "RB2610.SF", which QMT does not recognise.
+        self.assertEqual(context.tick_codes, [["rb2708.SF", "a2609.DF"]])
+        self.assertEqual(sorted(ticks), ["a2609.DF", "rb2708.SF"])
+
+    def test_get_ticks_still_completes_the_suffix(self):
+        """Only case is restored. Completing '600000' to '600000.SH' is useful
+        normalization that callers depend on, so it must survive."""
+        context = FakeContext()
+        provider = BigQmtMarketDataProvider(context)
+
+        self.assertIn("600000.SH", provider.get_ticks(["600000"]))
+
+    def test_get_ticks_passes_through_an_unrequested_key(self):
+        """Dropping a quote QMT volunteered would be worse than an odd key."""
+        class ExtraContext:
+            def get_full_tick(self, codes):
+                return {"RB2708.SF": {"lastPrice": 1.0}, "SURPRISE.SF": {"lastPrice": 2.0}}
+
+        ticks = BigQmtMarketDataProvider(ExtraContext()).get_ticks(["rb2708.SF"])
+
+        self.assertEqual(sorted(ticks), ["SURPRISE.SF", "rb2708.SF"])
+
+    def test_get_ticks_maps_back_whichever_case_qmt_answers_in(self):
+        """We send the caller's spelling now, but whether QMT echoes that or
+        canonicalises could not be observed here -- this terminal has no futures
+        data. The mapping must hold either way, or #58 comes back."""
+        class Echoes:
+            def get_full_tick(self, codes):
+                return dict((c, {"lastPrice": 1.0}) for c in codes)
+
+        class Canonicalises:
+            def get_full_tick(self, codes):
+                return dict((c.upper(), {"lastPrice": 1.0}) for c in codes)
+
+        for context in (Echoes(), Canonicalises()):
+            ticks = BigQmtMarketDataProvider(context).get_ticks(
+                ["rb2708.SF", "a2609.DF"])
+            self.assertEqual(sorted(ticks), ["a2609.DF", "rb2708.SF"],
+                             context.__class__.__name__)
+
+    def test_get_ticks_recovers_missing_option_from_latest_tick_row(self):
+        """Full Big-QMT may omit .SHO from get_full_tick while tick history is live."""
+        class OptionContext:
+            def __init__(self):
+                self.full_tick_calls = []
+                self.market_calls = []
+
+            def get_full_tick(self, codes):
+                self.full_tick_calls.append(list(codes))
+                return {"510050.SH": {"lastPrice": 3.05}}
+
+            def get_market_data_ex_ori(self, fields=None, stock_code=None,
+                                       period="1d", start_time="", end_time="",
+                                       count=-1, dividend_type="none"):
+                self.market_calls.append({
+                    "fields": fields, "stock_code": stock_code,
+                    "period": period, "count": count,
+                    "dividend_type": dividend_type,
+                })
+                return {
+                    "10010974.SHO": {
+                        "time": [1, 2],
+                        "lastPrice": [0.0458, 0.0459],
+                        "bidPrice": [[0.0457], [0.0458]],
+                    },
+                    "90009999.SZO": {
+                        "time": [2],
+                        "lastPrice": [0.1234],
+                        "askPrice": [[0.1235]],
+                    },
+                }
+
+        context = OptionContext()
+        ticks = BigQmtMarketDataProvider(context).get_ticks([
+            "510050.SH", "10010974.SHO", "90009999.SZO",
+        ])
+
+        self.assertEqual(ticks["510050.SH"]["lastPrice"], 3.05)
+        self.assertEqual(ticks["10010974.SHO"]["lastPrice"], 0.0459)
+        self.assertEqual(ticks["10010974.SHO"]["bidPrice"], [0.0458])
+        self.assertEqual(ticks["90009999.SZO"]["lastPrice"], 0.1234)
+        self.assertEqual(context.full_tick_calls, [[
+            "510050.SH", "10010974.SHO", "90009999.SZO",
+        ]])
+        self.assertEqual(context.market_calls, [{
+            "fields": [],
+            "stock_code": ["10010974.SHO", "90009999.SZO"],
+            "period": "tick",
+            "count": 1,
+            "dividend_type": "none",
+        }])
+
+    def test_get_ticks_does_not_fallback_for_missing_non_option(self):
+        class EmptyContext:
+            def get_full_tick(self, codes):
+                return {}
+
+            def get_market_data_ex(self, *args, **kwargs):
+                raise AssertionError("non-option code must not use tick-history fallback")
+
+        self.assertEqual(
+            BigQmtMarketDataProvider(EmptyContext()).get_ticks(["510050.SH"]),
+            {},
+        )
+
+    def test_get_ticks_keeps_native_results_when_option_fallback_fails(self):
+        class FailingContext:
+            def get_full_tick(self, codes):
+                return {"510050.SH": {"lastPrice": 3.05}}
+
+            def get_market_data_ex(self, *args, **kwargs):
+                raise RuntimeError("unsupported on old QMT")
+
+        ticks = BigQmtMarketDataProvider(FailingContext()).get_ticks([
+            "510050.SH", "10010974.SHO",
+        ])
+
+        self.assertEqual(ticks, {"510050.SH": {"lastPrice": 3.05}})
+
+    def test_futures_exchange_tokens_reach_qmt_instead_of_raising(self):
+        """A futures exchange token used to die in normalize_stock_code with
+        "invalid stock code: IF", so a whole-exchange futures snapshot was
+        impossible. It goes through now; whether QMT has the data is its own
+        answer to give (this terminal returns empty for all six)."""
+        class FakeCtx:
+            def __init__(self):
+                self.asked = []
+
+            def get_full_tick(self, codes):
+                self.asked.append(list(codes))
+                return {}
+
+        for token in ("IF", "SF", "DF", "ZF", "INE", "GF"):
+            context = FakeCtx()
+            BigQmtMarketDataProvider(context).get_ticks([token])
+            self.assertEqual(context.asked, [[token]], token)
+
+    def test_option_exchange_tokens_reach_qmt_instead_of_raising(self):
+        """SHO/SZO are native QMT market tokens, not instrument codes.
+
+        The adapter must pass them through so the running terminal can answer
+        whether its build supports whole-option-market snapshots.
+        """
+        class FakeCtx:
+            def __init__(self):
+                self.asked = []
+
+            def get_full_tick(self, codes):
+                self.asked.append(list(codes))
+                return {}
+
+        for token in ("SHO", "SZO"):
+            context = FakeCtx()
+            BigQmtMarketDataProvider(context).get_ticks([token])
+            self.assertEqual(context.asked, [[token]], token)
+
+    def test_a_futures_token_is_never_narrowed_to_stocks(self):
+        """A futures exchange lists only futures -- the token already says what
+        it holds, so there is nothing to narrow and no A-share sector to use."""
+        class FakeCtx:
+            def __init__(self):
+                self.asked = []
+
+            def get_full_tick(self, codes):
+                self.asked.append(list(codes))
+                return {}
+
+        context = FakeCtx()
+        provider = BigQmtMarketDataProvider(context)
+        provider.get_stock_list_in_sector = lambda name: ["600000.SH"]
+
+        provider.get_ticks(["SF"], types=["stock"])
+
+        self.assertEqual(context.asked, [["SF"]])
 
     def test_market_provider_passes_market_codes_to_full_tick(self):
         context = FakeContext()
@@ -129,6 +408,11 @@ class BigQmtAdaptersTest(unittest.TestCase):
                         m_nVolume=1000,
                         m_nCanUseVolume=800,
                         m_dOpenPrice=3.456,
+                        m_dLastPrice=3.789,
+                        m_dMarketValue=3789.0,
+                        m_nFrozenVolume=200,
+                        m_nOnRoadVolume=10,
+                        m_nYesterdayVolume=900,
                         m_strInstrumentName="ETF",
                     )
                 ]
@@ -141,6 +425,11 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(positions["510300.SH"].volume, 1000)
         self.assertEqual(positions["510300.SH"].available, 800)
         self.assertEqual(positions["510300.SH"].cost, 3.456)
+        self.assertEqual(positions["510300.SH"].price, 3.789)
+        self.assertEqual(positions["510300.SH"].market_value, 3789.0)
+        self.assertEqual(positions["510300.SH"].frozen_volume, 200)
+        self.assertEqual(positions["510300.SH"].on_road_volume, 10)
+        self.assertEqual(positions["510300.SH"].yesterday_volume, 900)
 
     def test_order_gateway_submit_uses_qmt_jq_trade_passorder_shape(self):
         calls = []
@@ -189,6 +478,9 @@ class BigQmtAdaptersTest(unittest.TestCase):
                     m_nVolumeTotalOriginal=1000,
                     m_nVolumeTraded=200,
                     m_nOrderStatus=50,
+                    m_dLimitPrice=10.12,
+                    m_nOrderPriceType=44,
+                    m_dTradedPrice=10.05,
                 )
             ]
 
@@ -208,6 +500,19 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(orders[0].stock_code, "000001.SZ")
         self.assertEqual(orders[0].action, "SELL")
         self.assertEqual(orders[0].traded_volume, 200)
+        self.assertEqual(orders[0].price, 10.12)
+        self.assertEqual(orders[0].price_type, 44)
+        self.assertEqual(orders[0].traded_price, 10.05)
+
+    def test_query_orders_optional_price_fields_keep_old_qmt_compatible(self):
+        """旧 QMT 不返回可选价格字段时保持 None。"""
+        def fake_query(*_args):
+            return [Obj(m_strOrderSysID="legacy-1", m_strRemark="legacy", m_strInstrumentID="000001", m_strExchangeID="SZ", m_nOffsetFlag=49, m_nVolumeTotalOriginal=200, m_nVolumeTraded=0, m_nOrderStatus=50)]
+
+        order = BigQmtOrderGateway(context_info=object(), get_trade_detail_data_func=fake_query).query_orders_strict("acct", "")[0]
+
+        self.assertIsNone(order.price_type)
+        self.assertEqual(order.traded_price, 0.0)
 
     def test_query_trades_without_strategy_omits_strategy_filter(self):
         calls = []
@@ -246,7 +551,46 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertEqual(trades[0].commission, 5.12)
         self.assertEqual(trades[0].amount, 5476.0)
 
+    def test_query_trades_reads_official_deal_amount_time_and_strategy(self):
+        # 官方文档 (dict.thinktrader.net data_structure): Deal 对象含
+        # m_dTradeAmount(成交额)、m_strTradeDate+m_strTradeTime(成交日期/时间)、
+        # m_strRemark(投资备注, 即 passorder 的 userOrderId)。
+        def fake_query(account, account_type, detail_type, strategy_name):
+            return [
+                Obj(
+                    m_strTradeID="t-1",
+                    m_strOrderSysID="sys-1",
+                    m_strInstrumentID="600000",
+                    m_strExchangeID="SH",
+                    m_nOffsetFlag=49,
+                    m_nVolume=100,
+                    m_dPrice=10.5,
+                    m_dTradeAmount=1055.55,
+                    m_strTradeDate="20260820",
+                    m_strTradeTime="100001",
+                    m_strRemark="rmk-1",
+                )
+            ]
+
+        gateway = BigQmtOrderGateway(
+            context_info=object(),
+            get_trade_detail_data_func=fake_query,
+        )
+
+        trades = gateway.query_trades_strict("acct", "strat-a")
+
+        self.assertEqual(trades[0].amount, 1055.55)
+        expected_ts = time.mktime(time.strptime("20260820100001", "%Y%m%d%H%M%S"))
+        self.assertEqual(trades[0].traded_time, int(expected_ts))
+        # 按策略名过滤时返回集必属该策略 (官方: strategyName 仅对委托/成交查询有效)
+        self.assertEqual(trades[0].strategy_name, "strat-a")
+
     def test_factory_bigqmt_mode_wires_real_adapters(self):
+        # Strategy tests reload adapters to exercise QMT editor reruns.
+        from bigqmt_signal_trader.adapters.market_bigqmt import BigQmtMarketDataProvider
+        from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+        from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
+
         app = build_app(
             FakeContext(),
             {
@@ -265,5 +609,98 @@ class BigQmtAdaptersTest(unittest.TestCase):
         self.assertIsInstance(app.order_gateway, BigQmtOrderGateway)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class FinancialFieldTranslateTest(unittest.TestCase):
+    """Issue #52: MiniQMT table names must translate to Big QMT's dotted
+    "BIGTABLE.field" fieldList before calling ContextInfo.get_financial_data."""
+
+    def _provider(self):
+        calls = []
+
+        class _Ctx:
+            def get_financial_data(self, field_list, stock_list, start_date, end_date, report_type):
+                calls.append((field_list, stock_list, start_date, end_date, report_type))
+                return {}
+
+        return BigQmtMarketDataProvider(_Ctx()), calls
+
+    def test_miniqmt_table_name_expands_to_full_dotted_field_list(self):
+        provider, calls = self._provider()
+        provider.get_financial_data(["600000.SH"], ["Balance"], "20260101", "20260819")
+        field_list = calls[0][0]
+        self.assertEqual(calls[0][1], ["600000.SH"])  # stockList second
+        self.assertTrue(field_list)
+        self.assertTrue(all(f.startswith("ASHAREBALANCESHEET.") for f in field_list))
+        self.assertIn("ASHAREBALANCESHEET.tot_assets", field_list)
+        self.assertIn("ASHAREBALANCESHEET.tot_liab", field_list)
+
+    def test_bigqmt_bare_table_name_also_expands(self):
+        provider, calls = self._provider()
+        provider.get_financial_data(["600000.SH"], ["CAPITALSTRUCTURE"])
+        field_list = calls[0][0]
+        self.assertIn("CAPITALSTRUCTURE.total_capital", field_list)
+
+    def test_dotted_entries_remap_prefix_and_bigqmt_dots_pass_through(self):
+        provider, calls = self._provider()
+        provider.get_financial_data(["600000.SH"], [
+            "Balance.tot_assets",
+            "ASHAREINCOME.net_profit_incl_min_int_inc",
+        ])
+        field_list = calls[0][0]
+        self.assertEqual(field_list, [
+            "ASHAREBALANCESHEET.tot_assets",
+            "ASHAREINCOME.net_profit_incl_min_int_inc",
+        ])
+
+    def test_unknown_table_name_passes_through(self):
+        provider, calls = self._provider()
+        provider.get_financial_data(["600000.SH"], ["CustomTable"])
+        self.assertEqual(calls[0][0], ["CustomTable"])
+
+
+
+
+class UnparsableRowIsolationTest(unittest.TestCase):
+    """Incomplete native query results must never look complete or empty."""
+
+    def test_business_and_strict_queries_propagate_row_parse_errors(self):
+        from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+        from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
+
+        good = Obj(stock_code="600000.SH", volume=100, available=100,
+                   yesterday_volume=100, user_order_id="other-tag")
+        invalid_rows = (
+            Obj(stock_code="???", volume=100, available=100, yesterday_volume=100),
+            Obj(m_strInstrumentID="rb2401", m_strExchangeID="SHFE",
+                volume=100, available=100, yesterday_volume=100),
+        )
+        for bad in invalid_rows:
+            for rows in ([bad], [good, bad], [bad, good]):
+                query = lambda *args: rows
+                provider = BigQmtPositionProvider(query)
+                gateway = BigQmtOrderGateway(None, get_trade_detail_data_func=query)
+                methods = (
+                    (provider.get_positions, ("acct",)),
+                    (provider.list_positions, ("acct",)),
+                    (gateway.query_orders, ("acct", "")),
+                    (gateway.query_orders_strict, ("acct", "")),
+                    (gateway.query_trades, ("acct", "")),
+                    (gateway.query_trades_strict, ("acct", "")),
+                    (gateway.query_submission_identities_strict, ("acct", "")),
+                )
+                for method, args in methods:
+                    with self.subTest(method=method.__name__, rows=rows):
+                        with self.assertRaises(ValueError):
+                            method(*args)
+
+    def test_empty_native_results_remain_successful(self):
+        from bigqmt_signal_trader.adapters.position_bigqmt import BigQmtPositionProvider
+        from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway
+
+        query = lambda *args: []
+        provider = BigQmtPositionProvider(query)
+        gateway = BigQmtOrderGateway(None, get_trade_detail_data_func=query)
+        self.assertEqual(provider.get_positions("acct"), {})
+        self.assertEqual(provider.list_positions("acct"), [])
+        self.assertEqual(gateway.query_orders("acct", ""), [])
+        self.assertEqual(gateway.query_trades("acct", ""), [])
+        self.assertEqual(gateway.query_submission_identities_strict("acct", ""), ([], []))

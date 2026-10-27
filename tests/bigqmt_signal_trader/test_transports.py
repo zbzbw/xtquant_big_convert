@@ -110,6 +110,64 @@ class FakeTransportTest(unittest.TestCase):
         self.assertIn("handler exploded", sent[0]["error"])
 
 
+class ZmqSendBackpressureTest(unittest.TestCase):
+    """出站堆积自动清理：peer 水位满（Again）时让位进队列，不阻塞 router 线程。"""
+
+    def test_muted_peer_falls_back_to_queue(self):
+        import threading
+        from bigqmt_signal_trader.transports.zmq_transport import ZmqTransport
+
+        t = ZmqTransport(account_id="acct")
+        calls = []
+
+        class _Again(Exception):
+            pass
+
+        class FakeZmq:
+            DONTWAIT = 1
+            Again = _Again
+
+        class FakeRouter:
+            def send_multipart(self, frames, flags=0):
+                calls.append(flags)
+                raise _Again("peer muted")
+
+        t._zmq = FakeZmq()
+        t._router = FakeRouter()
+        t._router_thread = threading.current_thread()  # 触发内联路径
+        t._pending_identities["rid-1"] = b"peer-1"
+
+        t.send_response({"request_id": "rid-1"},
+                        {"request_id": "rid-1", "method": "ping", "ok": True, "data": {}})
+
+        # 内联发送用 DONTWAIT 尝试过一次，失败后让位进队列（不阻塞不丢）
+        self.assertEqual(calls, [1])
+        self.assertEqual(t._response_queue.qsize(), 1)
+
+    def test_queue_overflow_drops_oldest(self):
+        import threading
+        from bigqmt_signal_trader.transports.zmq_transport import ZmqTransport
+
+        t = ZmqTransport(account_id="acct")
+        t._max_queued_responses = 3
+
+        class FakeZmq:
+            DONTWAIT = 1
+
+            class Again(Exception):
+                pass
+
+        t._zmq = FakeZmq()
+        t._router = None
+        for i in range(5):
+            t._pending_identities["rid-%d" % i] = b"peer"
+            t._queue_response(b"peer", b"payload-%d" % i, reason="test")
+
+        # 5 条进、上限 3，丢 2 条最旧，剩 3 条
+        self.assertEqual(t._response_queue.qsize(), 3)
+        self.assertEqual(t._dropped_response_count, 2)
+
+
 class FactoryTest(unittest.TestCase):
     def test_unknown_transport_rejected(self):
         with self.assertRaises(ValueError):
@@ -161,7 +219,22 @@ class ZmqTransportTest(unittest.TestCase):
         encoded = _encode_response(response, binary_threshold_bytes=100)
 
         self.assertTrue(encoded.startswith(BINARY_JSON_ZLIB_PREFIX))
-        self.assertEqual(_loads(encoded), response)
+        decoded = _loads(encoded)
+        self.assertFalse(decoded.pop("__bigqmt_typed__"))
+        self.assertEqual(decoded, response)
+
+    def test_compressed_response_preserves_typed_dataframe_detection(self):
+        from bigqmt_signal_trader.transports.zmq_transport import _encode_response, _loads
+        from bigqmt_signal_trader.xtquant_compat import _restore_jsonable
+        import pandas as pd
+
+        frame = {"__bigqmt_type__": "DataFrame", "columns": ["close"],
+                 "records": [{"close": 10.5}]}
+        response = _loads(_encode_response({"data": frame}, binary_threshold_bytes=1))
+        self.assertTrue(response["__bigqmt_typed__"])
+        restored = _restore_jsonable(response["data"])
+        self.assertIsInstance(restored, pd.DataFrame)
+        self.assertEqual(restored["close"].tolist(), [10.5])
 
     def test_small_response_keeps_legacy_wire_encoding(self):
         from bigqmt_signal_trader.transports.zmq_transport import (
@@ -174,7 +247,9 @@ class ZmqTransportTest(unittest.TestCase):
         encoded = _encode_response(response, binary_threshold_bytes=10000)
 
         self.assertFalse(encoded.startswith(BINARY_JSON_ZLIB_PREFIX))
-        self.assertEqual(_loads(encoded), response)
+        decoded = _loads(encoded)
+        self.assertFalse(decoded.pop("__bigqmt_typed__"))
+        self.assertEqual(decoded, response)
 
     def test_round_trip(self):
         from bigqmt_signal_trader.transports.zmq_transport import ZmqTransport
@@ -374,5 +449,104 @@ class MysqlTransportTest(unittest.TestCase):
             server.stop()
 
 
+class RedisAdjustDrainTest(unittest.TestCase):
+    def test_redis_adjust_lpop_skipped_when_brpop_thread_alive(self):
+        """Background BRPOP owns the list; adjust LPOP must not steal it."""
+        from bigqmt_signal_trader.transports.redis_transport import RedisTransport
+
+        class _AliveThread(object):
+            def is_alive(self):
+                return True
+
+        class _FailRedis(object):
+            def lpop(self, key):
+                raise AssertionError("adjust LPOP should not run while BRPOP owns %s" % key)
+
+        transport = RedisTransport.__new__(RedisTransport)
+        transport.print_prefix = "[test]"
+        transport.account_id = "acct"
+        transport.request_queue_template = "bigqmt:rpc:queue:{account_id}"
+        transport.listen_redis = _FailRedis()
+        transport.on_raw_payload = None
+        transport._queue_thread = _AliveThread()
+        self.assertEqual(0, transport.drain_request_queue(max_items=20))
+
+    def test_redis_adjust_lpop_runs_when_brpop_thread_dead(self):
+        """If the BRPOP thread is gone, LPOP remains the adjust fallback."""
+        from bigqmt_signal_trader.transports.redis_transport import RedisTransport
+
+        class _DeadThread(object):
+            def is_alive(self):
+                return False
+
+        class _EmptyRedis(object):
+            def lpop(self, key):
+                return None
+
+        transport = RedisTransport.__new__(RedisTransport)
+        transport.print_prefix = "[test]"
+        transport.account_id = "acct"
+        transport.request_queue_template = "bigqmt:rpc:queue:{account_id}"
+        transport.listen_redis = _EmptyRedis()
+        transport.on_raw_payload = None
+        transport._queue_thread = _DeadThread()
+        self.assertEqual(0, transport.drain_request_queue(max_items=20))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedisPipelineErrorSlimTest(unittest.TestCase):
+    """A failed response pipeline must not raise with the payload embedded.
+
+    redis-py renders a failed batch with its command arguments, and the
+    argument is the response JSON itself. An OOM refusal on a large K-line
+    reply measured 5 MB of str(exc); a handful of such lines wrote a 542 MB
+    log file and degraded the bridge until it stopped serving. See
+    _slim_pipeline_error in redis_transport.
+    """
+
+    class _FailingClient(object):
+        def __init__(self, error):
+            self._error = error
+
+        def pipeline(self, transaction=True):
+            client_error = self._error
+
+            class _Pipe(object):
+                def setex(self, *args, **kwargs):
+                    pass
+
+                def publish(self, *args, **kwargs):
+                    pass
+
+                def execute(self):
+                    raise client_error
+
+            return _Pipe()
+
+    def _transport(self, error):
+        from bigqmt_signal_trader.transports.redis_transport import RedisTransport
+        return RedisTransport(self._FailingClient(error), account_id="acct")
+
+    def test_pipeline_error_payload_is_slimmed(self):
+        big = RuntimeError(
+            "OOM command not allowed when used memory > 'maxmemory'. "
+            "x" * 5000000)
+        transport = self._transport(big)
+        with self.assertRaises(RuntimeError) as ctx:
+            transport.send_response(
+                {"request_id": "r1"}, {"request_id": "r1", "ok": True})
+        message = str(ctx.exception)
+        self.assertLessEqual(len(message), 800)
+        self.assertIn("OOM command not allowed", message)
+        self.assertIn("chars of embedded payload omitted", message)
+
+    def test_short_pipeline_error_untouched(self):
+        short = RuntimeError("connection refused")
+        transport = self._transport(short)
+        with self.assertRaises(RuntimeError) as ctx:
+            transport.send_response(
+                {"request_id": "r1"}, {"request_id": "r1", "ok": True})
+        self.assertIs(ctx.exception, short)

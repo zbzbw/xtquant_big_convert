@@ -36,7 +36,7 @@ class SyntheticQmt:
         if detail in ("DEAL", "TRADE"):
             return self.trades
         if detail == "POSITION":
-            return [Row(stock_code="600000.SH", volume=100, available=0, cost=10.0)] if self.trades else []
+            return [Row(stock_code="600000.SH", volume=100, available=0, yesterday_volume=100, cost=10.0)] if self.trades else []
         if detail == "ACCOUNT":
             return [Row(cash=99000.0 if self.trades else 100000.0,
                         total_asset=100000.0, frozen_cash=0.0)]
@@ -140,7 +140,9 @@ def test_environment_identity_matrix_zero_writes(environment, identity):
     expected = "live" if identity == "sim-account" and environment == "live" else None
     assert handlers.handle("ping")["account_environment"] == expected
     for method, params in [("order_stock", order()), ("order_stock_batch", {"orders": [order()]}),
-                           ("cancel_order_stock", {"order_id": "order-1"})]:
+                           ("cancel_order_stock", {"order_id": "order-1"}),
+                           ("passorder", {"op_type": 23, "order_code": "600000.SH", "volume": 100}),
+                           ("cancel_orders_batch", {"items": [{"order_sys_id": "order-1"}]})]:
         with pytest.raises(PermissionError):
             handlers.handle(method, params)
     assert qmt.writes == [] and handlers._submit_journal == {}
@@ -171,7 +173,10 @@ def test_conflicting_rpc_account_and_batch_override_zero_writes(params):
     handlers = make_handlers(qmt)
     for method, payload in [("submit_order", order(**params)),
                             ("cancel_order", dict(order_id="order-1", **params)),
-                            ("submit_orders_batch", {"orders": [order(), order(**params)]})]:
+                            ("submit_orders_batch", {"orders": [order(), order(**params)]}),
+                            ("passorder", dict(op_type=23, order_code="600000.SH", volume=100, **params)),
+                            ("cancel_orders_batch", {"items": [{"order_sys_id": "order-1"},
+                                                               dict(order_sys_id="order-2", **params)]})]:
         with pytest.raises(PermissionError):
             handlers.handle(method, payload)
     assert qmt.writes == []
@@ -220,6 +225,29 @@ def test_batch_rechecks_session_after_identity_query_before_write():
     assert qmt.writes == [] and handlers._submit_journal == {}
 
 
+@pytest.mark.parametrize("failed_detail", ["ORDER", "DEAL"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_batch_refuses_native_write_when_identity_rows_cannot_be_parsed(failed_detail, mixed):
+    qmt = SyntheticQmt()
+    bad = Row(stock_code="???", volume=100, available=100, yesterday_volume=100,
+              order_sys_id="existing-order", user_order_id="tag-1", trade_id="trade-1")
+    good = Row(stock_code="600000.SH", volume=100, available=100, yesterday_volume=100,
+               order_sys_id="other-order", user_order_id="other-tag", trade_id="trade-2")
+    qmt.query = lambda account, account_type, detail, strategy="": (
+        ([good, bad] if mixed else [bad]) if detail == failed_detail else [])
+    handlers = make_handlers(qmt)
+    service = RedisPubSubRpcService(MemoryRedis(), handlers, account_id="sim-account")
+
+    response = service.process_request({"method": "submit_orders_batch", "params": {
+        "orders": [order(require_idempotency_check=True)]}})
+
+    assert response["ok"]
+    result, = response["data"]
+    assert result["accepted"] is False
+    assert result["error"] == "IDEMPOTENCY_CHECK_UNAVAILABLE"
+    assert qmt.writes == [] and handlers._submit_journal == {}
+
+
 def test_binding_is_copied_and_ping_does_not_authorize_future_cancel():
     qmt = SyntheticQmt()
     binding = {"account_id": "sim-account", "account_environment": "live", "session_id": "session-1"}
@@ -245,9 +273,14 @@ def test_strategy_runtime_assembly_uses_only_node_inputs(monkeypatch):
     qmt = SyntheticQmt()
     config = {"node_account_binding": {"account_id": "sim-account", "account_environment": "broker_sim", "session_id": "session-1"},
               "session_facts_reader": qmt.session_facts}
-    with patch.object(runtime, "BIGQMT_REDIS_CONFIG", config), patch.object(runtime, "configure") as configure:
+    with patch.object(runtime, "BIGQMT_REDIS_CONFIG", config), patch.object(
+        runtime, "MARKET_STREAM_INSTRUMENTS", ("000001.SZ", "600000.SH")
+    ), patch.object(runtime, "configure") as configure:
         runtime._apply_config("sim-account")
     assembled = configure.call_args.kwargs
+    assert assembled["market_stream"]["instruments"] == (
+        "000001.SZ", "600000.SH"
+    )
     assembled.update(redis_client=MemoryRedis(), response_redis_client=MemoryRedis(),
                      qmt_api={"get_trade_detail_data": qmt.query})
     app = Row(order_gateway=make_handlers(qmt).order_gateway)

@@ -7,7 +7,7 @@ import time
 import uuid
 
 
-MARKET_STREAM_SCHEMA_VERSION = 2
+MARKET_STREAM_SCHEMA_VERSION = 3
 
 
 def _wall_time_ns():
@@ -23,6 +23,9 @@ class MarketStreamBuffer:
         max_records=1000000,
         batch_max_records=None,
         universe_size=0,
+        subscription_identity="unscoped",
+        universe_identity="unscoped",
+        subscription_started_at_ns=None,
     ):
         if isinstance(max_batches, bool) or int(max_batches) <= 0:
             raise ValueError("max_batches must be positive")
@@ -42,12 +45,23 @@ class MarketStreamBuffer:
             raise ValueError("batch_max_records must not exceed max_records")
         if isinstance(universe_size, bool) or int(universe_size) < 0:
             raise ValueError("universe_size must not be negative")
+        if not str(subscription_identity or "").strip():
+            raise ValueError("subscription_identity must not be empty")
+        if not str(universe_identity or "").strip():
+            raise ValueError("universe_identity must not be empty")
         self.max_batches = int(max_batches)
         self.max_records = int(max_records)
         self.batch_max_records = int(resolved_batch_max_records)
         self.universe_size = int(universe_size)
+        self.subscription_identity = str(subscription_identity)
+        self.universe_identity = str(universe_identity)
         self.stream_id = uuid.uuid4().hex
         self.started_at_ns = _wall_time_ns()
+        self.subscription_started_at_ns = int(
+            subscription_started_at_ns or self.started_at_ns
+        )
+        if self.subscription_started_at_ns <= 0:
+            raise ValueError("subscription_started_at_ns must be positive")
         self._lock = threading.RLock()
         self._batches = deque()
         self._record_count = 0
@@ -137,6 +151,10 @@ class MarketStreamBuffer:
                 "callback_errors": self._callback_errors,
                 "universe_size": self.universe_size,
                 "filtered_records": self._filtered_records,
+                "subscription_identity": self.subscription_identity,
+                "universe_identity": self.universe_identity,
+                "subscription_active": True,
+                "subscription_started_at_ns": self.subscription_started_at_ns,
                 "max_batches": self.max_batches,
                 "max_records": self.max_records,
                 "batch_max_records": self.batch_max_records,

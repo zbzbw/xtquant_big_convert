@@ -12,13 +12,20 @@ class _UnusedProvider:
 
 class MarketStreamBufferTests(unittest.TestCase):
     def test_status_exposes_universe_and_filtered_record_counts(self):
-        stream = MarketStreamBuffer(universe_size=3)
+        stream = MarketStreamBuffer(
+            universe_size=3,
+            subscription_identity="requested",
+            universe_identity="actual",
+        )
         stream.record_filtered_records(4)
 
         status = stream.status()
 
         self.assertEqual(status["universe_size"], 3)
         self.assertEqual(status["filtered_records"], 4)
+        self.assertEqual(status["subscription_identity"], "requested")
+        self.assertEqual(status["universe_identity"], "actual")
+        self.assertTrue(status["subscription_active"])
 
     def test_drain_preserves_callback_batch_order(self):
         stream = MarketStreamBuffer(max_batches=4, max_records=10)
@@ -121,7 +128,7 @@ class MarketStreamBufferTests(unittest.TestCase):
         third = stream.drain(after_sequence=second["next_sequence"], max_records=2)
 
         self.assertEqual(latest, 3)
-        self.assertEqual(first["schema_version"], 2)
+        self.assertEqual(first["schema_version"], 3)
         self.assertEqual(first["batch_max_records"], 2)
         self.assertEqual(first["latest_callback_sequence"], 1)
         self.assertEqual(first["returned_records"], 2)
