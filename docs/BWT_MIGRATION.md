@@ -1,6 +1,6 @@
 # BWT converter migration (ZBW-74)
 
-The candidate is `0.3.75+bwt.3`, based on upstream main as read on
+The candidate is `0.3.75+bwt.4`, based on upstream main as read on
 2026-10-27. The latest upstream GitHub release is `v0.3.73`; main additionally
 contains the 0.3.74 forming daily-bar fix and 0.3.75 MultiIndex serialization
 fix. The previous BWT vendor package declared `0.2.0` and included changes
@@ -17,6 +17,7 @@ are relative to the BWT repository.
 | Trade costs and `TradeSnapshot` fields | Replace with upstream | `adapter/bigqmt/native/models.py` parses commission and amount; `nautilus/live_execution.py` consumes commission. Upstream preserves both fields, handles the two native commission spellings and extends the model. Existing calls use named arguments. |
 | Native position/order/trade query failures | Reuse upstream queries; remove row skipping | BWT provider account snapshots and required duplicate checks need complete results. `list_positions`, `query_orders_strict` and `query_trades_strict` propagate row parsing failures, including a single invalid row among valid rows. `query_submission_identities_strict` inherits that behavior. Business RPC queries return the existing error response; required duplicate checks refuse native writes through the existing per-item error. Real empty native results remain successful. |
 | Adjustable cadence logging | Retain | `scripts/deploy_bigqmt_embedded.py` explicitly suppresses normal summaries and configures the warning interval. Keep those settings alongside upstream scheduling, drain budgets and diagnostics. |
+| Pipe service startup logging (ZBW-175) | Correct upstream startup output | The prepared embedded entry starts `RedisPubSubRpcService` over Pipe. In both background and adjust-drain modes, log only `transport=pipe`, `background_threads` and the active heavy worker state; omit the account, account-suffixed pipe path and Redis channel/queue names. This reuses the service's existing print entry. |
 | Native whole-market callback bridge | Retain cursor recording; reuse upstream native subscription API | `native/provider.py`, `native/datafeed.py` and `recording/recorder.py` read callback batches. Upstream live quote push has no retained cursor, pagination or overflow report and cannot replace this recording input. |
 | Local-only historical reads | Replace old argument-shape patch with a small upstream correction | `native/provider.py` requests `subscribe=False`. Preserve that explicit value for every supported argument shape, including the MiniQMT-style signature. Unsupported local-only reads fail instead of silently subscribing. Upstream supplies local data and forming daily-bar handling. |
 | Callback splitting and pagination | Retain | The recorder drains complete bounded batches, retaining callback part numbers, bootstrap facts, sequence and overflow information. Push delivery alone does not provide these facts. |

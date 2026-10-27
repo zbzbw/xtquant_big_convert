@@ -4033,11 +4033,16 @@ class RedisPubSubRpcService:
         self._queue_thread = getattr(self._transport, "_queue_thread", None)
         if not self.background_threads:
             self._start_heavy_worker()
+        if self._transport.name == "pipe":
+            print("%s started transport=pipe background_threads=%s heavy_offload=%s"
+                  % (self.print_prefix, self.background_threads,
+                     self._heavy_thread is not None))
+        elif not self.background_threads:
             print("%s started queue=%s background_threads=False heavy_offload=%s"
                   % (self.print_prefix, self.request_queue,
                      self._heavy_thread is not None))
-            return
-        print("%s started channel=%s queue=%s" % (self.print_prefix, self.request_channel, self.request_queue))
+        else:
+            print("%s started channel=%s queue=%s" % (self.print_prefix, self.request_channel, self.request_queue))
 
     def stop(self):
         self._running.clear()

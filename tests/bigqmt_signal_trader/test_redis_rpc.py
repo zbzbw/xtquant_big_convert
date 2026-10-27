@@ -3,6 +3,8 @@ import time
 import os
 import sys
 import unittest
+import io
+from contextlib import redirect_stdout
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -140,6 +142,50 @@ def _service_with_listener_methods(allow_order_methods=False, process_in_listene
         process_in_listener=process_in_listener,
         listener_methods=listener_methods,
     )
+
+
+class ServiceStartupLogTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "named pipes are Windows-only")
+    def test_pipe_startup_reports_mode_without_account_or_routes(self):
+        import uuid
+        from bigqmt_signal_trader.transports.pipe_transport import NamedPipeTransport
+
+        for background, heavy_offload in ((True, True), (False, True), (False, False)):
+            with self.subTest(background_threads=background, heavy_offload=heavy_offload):
+                account = "synthetic-startup-account"
+                transport = NamedPipeTransport(
+                    account_id=account, pipe_name="startup_" + uuid.uuid4().hex)
+                handlers = BigQmtRpcHandlers(
+                    account, FakeMarketData(), FakePositionProvider(),
+                    allow_order_methods=False)
+                service = RedisPubSubRpcService(
+                    None, handlers, account_id=account, transport=transport,
+                    background_threads=background, heavy_offload=heavy_offload,
+                    request_channel_template="private-channel:{account_id}",
+                    request_queue_template="private-queue:{account_id}")
+                output = io.StringIO()
+                heavy = None
+                with redirect_stdout(output):
+                    try:
+                        service.start()
+                        heavy = service._heavy_thread
+                    finally:
+                        service.stop()
+                if transport._listener is not None:
+                    transport._listener.join(2)
+                    self.assertFalse(transport._listener.is_alive())
+                if heavy is not None:
+                    heavy.join(2)
+                    self.assertFalse(heavy.is_alive())
+                self.assertEqual(transport._server_handles, [])
+                log = output.getvalue()
+                self.assertIn("started", log)
+                self.assertIn("transport=pipe", log)
+                self.assertIn("background_threads=%s" % background, log)
+                self.assertIn("heavy_offload=%s" % (heavy is not None), log)
+                for private in (account, transport.path, service.request_channel,
+                                service.request_queue, "channel=", "queue=", "\\\\.\\pipe\\"):
+                    self.assertNotIn(private, log)
 
 
 class FakeOrderGateway(DryRunOrderGateway):
