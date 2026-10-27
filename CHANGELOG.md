@@ -2,6 +2,15 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.3.75+bwt.3] - 2026-10-27
+
+- Cover Named Pipe connection waits, blocking request writes and response reads
+  with one request deadline. Cancel in-flight I/O on stop before closing handles.
+- Report failed or cancelled writes without automatically reconnecting/resending;
+  a later explicit call can establish a fresh connection after a failure.
+- Handle cancelled/closed response writes in connection workers without an
+  unhandled thread exception. Stop prevents new client requests on that instance.
+
 ## [0.3.75+bwt.2] - 2026-10-27
 
 - Propagate native POSITION/ORDER/DEAL row parsing failures through the existing

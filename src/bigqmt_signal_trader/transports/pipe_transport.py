@@ -158,6 +158,8 @@ class NamedPipeTransport(RpcTransport):
         # 注册表 ident -> (handle, token)：线程退出时由 finalizer 精确释放，
         # finalizer 没跑成的由 _sweep_dead_thread_handles 兜底（#431）。
         self._client_threads = {}
+        self._pending_io = {}
+        self._stopped = threading.Event()
         # 读缓冲也按线程持有 —— 见 _read_buffer 里的实测数字。
         self._io_local = threading.local()
 
@@ -170,14 +172,31 @@ class NamedPipeTransport(RpcTransport):
     def _last_error(self):
         return ctypes.get_last_error()
 
+    def _begin_io(self, handle):
+        finished = threading.Event()
+        with self._server_lock:
+            if self._stopped.is_set():
+                raise TransportError("named pipe transport stopped")
+            self._pending_io[handle] = finished
+        return finished
+
+    def _end_io(self, handle, finished):
+        with self._server_lock:
+            self._pending_io.pop(handle, None)
+            finished.set()
+
     def _write(self, handle, payload):
         dll = self._dll()
         written = self._wintypes.DWORD()
-        ok = dll.WriteFile(handle, payload, len(payload),
-                           ctypes.byref(written), None)
-        if not ok:
-            raise TransportError("WriteFile failed (err=%s)" % self._last_error())
-        return written.value
+        finished = self._begin_io(handle)
+        try:
+            ok = dll.WriteFile(handle, payload, len(payload),
+                               ctypes.byref(written), None)
+            if not ok:
+                raise TransportError("WriteFile failed (err=%s)" % self._last_error())
+            return written.value
+        finally:
+            self._end_io(handle, finished)
 
     def _read_buffer(self):
         """按线程复用读缓冲。
@@ -206,35 +225,47 @@ class NamedPipeTransport(RpcTransport):
         buf = self._read_buffer()
         read = self._wintypes.DWORD()
         chunks = []
-        while True:
-            ok = dll.ReadFile(handle, buf, _BUFFER_BYTES, ctypes.byref(read), None)
-            if read.value:
-                chunks.append(ctypes.string_at(buf, read.value))
-            if ok:
-                break
-            err = self._last_error()
-            if err == ERROR_MORE_DATA:
-                continue
-            if err == ERROR_OPERATION_ABORTED:
-                return b""          # a writer woke us to write; not a close
-            if err in (ERROR_INVALID_HANDLE, ERROR_BROKEN_PIPE):
-                raise TransportError("pipe closed (err=%s)" % err)
-            if not self._running:
-                return b""
-            if not chunks or not chunks[0]:
-                return b""
-            raise TransportError("ReadFile failed (err=%s)" % err)
-        return b"".join(chunks)
+        finished = self._begin_io(handle)
+        try:
+            while True:
+                ok = dll.ReadFile(handle, buf, _BUFFER_BYTES, ctypes.byref(read), None)
+                if read.value:
+                    chunks.append(ctypes.string_at(buf, read.value))
+                if ok:
+                    break
+                err = self._last_error()
+                if err == ERROR_MORE_DATA:
+                    continue
+                if err == ERROR_OPERATION_ABORTED:
+                    return b""          # a writer woke us to write; not a close
+                if err in (ERROR_INVALID_HANDLE, ERROR_BROKEN_PIPE):
+                    raise TransportError("pipe closed (err=%s)" % err)
+                if not self._running:
+                    return b""
+                if not chunks or not chunks[0]:
+                    return b""
+                raise TransportError("ReadFile failed (err=%s)" % err)
+            return b"".join(chunks)
+        finally:
+            self._end_io(handle, finished)
 
     # -- client side -------------------------------------------------------
-    def _client_handle(self):
+    def _client_handle(self, request_deadline=None):
+        if self._stopped.is_set():
+            raise TransportError("named pipe transport stopped")
         handle = getattr(self._client_local, "handle", None)
         if handle is not None:
             return handle
         self._sweep_dead_thread_handles()
         dll = self._dll()
-        deadline = time.time() + self.connect_timeout_seconds
+        deadline = time.monotonic() + self.connect_timeout_seconds
+        if request_deadline is not None:
+            deadline = min(deadline, request_deadline)
         while True:
+            if self._stopped.is_set():
+                raise TransportError("named pipe transport stopped")
+            if request_deadline is not None and time.monotonic() >= request_deadline:
+                raise TransportTimeout("named pipe rpc timeout")
             handle = dll.CreateFileW(self.path, GENERIC_READ | GENERIC_WRITE,
                                      0, None, OPEN_EXISTING, 0, None)
             if handle != INVALID_HANDLE_VALUE:
@@ -244,7 +275,7 @@ class NamedPipeTransport(RpcTransport):
             # the accept thread but it has not created the first instance yet.
             # Retrying it is exactly as legitimate as retrying PIPE_BUSY.
             if err not in (ERROR_PIPE_BUSY, ERROR_FILE_NOT_FOUND) \
-                    or time.time() >= deadline:
+                    or time.monotonic() >= deadline:
                 raise TransportError(
                     "cannot connect to %s (err=%s). Is the QMT-side strategy "
                     "running with transport=pipe?" % (self.path, err))
@@ -260,6 +291,10 @@ class NamedPipeTransport(RpcTransport):
         # 没存在过，它必然空转，绝碰不到新句柄。
         self._client_local.finalizer = _ClientHandleFinalizer(self, ident, token)
         with self._server_lock:
+            if self._stopped.is_set():
+                dll.CloseHandle(handle)
+                self._client_local.handle = None
+                raise TransportError("named pipe transport stopped")
             stale = self._client_threads.get(ident)
             self._client_threads[ident] = (handle, token)
         if stale is not None:
@@ -316,59 +351,68 @@ class NamedPipeTransport(RpcTransport):
                 pass
 
     def _cancel_read(self, handle):
-        """Abort whatever ReadFile is pending on the handle -- the timeout
-        mechanism for the client (#236 defect 3).
-
-        The first design put a pump thread between the caller and the pipe so
-        the caller could wait on a queue instead. That dead-locked on the very
-        first request: a synchronous (non-overlapped) handle serializes I/O,
-        so a WriteFile issued while the pump sat in a blocking ReadFile on the
-        SAME handle never completes. The alternatives were overlapped I/O or a
-        second pipe per direction; a watchdog that cancels the blocking read
-        at the deadline keeps single-threaded I/O and gets the same real
-        timeout with none of that surgery. CancelIoEx is already the proven
-        shutdown mechanism on the server side (the stop() deadlock fix).
-        """
+        """Cancel pending read/write I/O; also wake a server reader to reply."""
         try:
             self._dll().CancelIoEx(handle, None)
         except Exception:
             pass
 
     def send_request(self, request, timeout_seconds):
-        payload = json.dumps(request, ensure_ascii=False, default=str).encode("utf-8")
-        try:
-            self._write(self._client_handle(), payload)
-        except TransportError:
-            # A write-side failure is provable: nothing left this process, so
-            # ONE reconnect-and-resend is safe (never a duplicate). A read-side
-            # failure is the unknown-outcome case and is NOT retried here --
-            # that is the #195 class of bug. The caller decides on those.
-            self._drop_client_handle()
-            self._write(self._client_handle(), payload)
-        return json.loads(decode_text(
-            self._read_with_watchdog(self._client_handle(), timeout_seconds)))
-
-    def _read_with_watchdog(self, handle, timeout_seconds):
+        deadline = (time.monotonic() + float(timeout_seconds)) if timeout_seconds else None
+        finished = threading.Event()
+        expired = threading.Event()
+        ident = threading.current_thread().ident
         watchdog = None
-        if timeout_seconds:
-            watchdog = threading.Timer(
-                float(timeout_seconds), self._cancel_read, args=(handle,))
-            watchdog.daemon = True
-            watchdog.start()
+        succeeded = False
+
+        def check_wait():
+            if self._stopped.is_set():
+                raise TransportError("named pipe transport stopped")
+            if expired.is_set() or (deadline is not None and time.monotonic() >= deadline):
+                raise TransportTimeout("named pipe rpc timeout")
+
+        def cancel_at_deadline():
+            expired.set()
+            # Cancellation can race the transition between WriteFile and
+            # ReadFile. Keep cancelling until the caller has left native I/O,
+            # including an operation started just after the first cancellation.
+            while not finished.is_set():
+                with self._server_lock:
+                    entry = self._client_threads.get(ident)
+                    if entry is not None:
+                        self._cancel_read(entry[0])
+                finished.wait(0.01)
+
         try:
+            payload = json.dumps(request, ensure_ascii=False, default=str).encode("utf-8")
+            handle = self._client_handle(deadline)
+            check_wait()
+            if deadline is not None:
+                watchdog = threading.Timer(max(0, deadline - time.monotonic()), cancel_at_deadline)
+                watchdog.daemon = True
+                watchdog.start()
+            self._write(handle, payload)
+            check_wait()
             raw = self._read(handle)
-        except TransportError:
-            self._drop_client_handle()
+            check_wait()
+            if not raw:
+                raise TransportError("named pipe response interrupted")
+            response = json.loads(decode_text(raw))
+            check_wait()
+            succeeded = True
+            return response
+        except Exception:
+            # A failed/cancelled write can already have reached the peer. Drop
+            # this connection and report the outcome; never reconnect/resend.
+            check_wait()
             raise
         finally:
+            finished.set()
             if watchdog is not None:
                 watchdog.cancel()
-        if not raw:
-            # Empty read is the watchdog's ERROR_OPERATION_ABORTED, a closed
-            # handle, or a broken pipe -- all mean the answer is not coming.
-            self._drop_client_handle()
-            raise TransportTimeout("named pipe rpc timeout")
-        return raw
+                watchdog.join()
+            if not succeeded:
+                self._drop_client_handle()
 
     def _drop_client_handle(self):
         handle = getattr(self._client_local, "handle", None)
@@ -377,11 +421,12 @@ class NamedPipeTransport(RpcTransport):
         # 本线程还活着，ident 此刻只属于它，按 ident 摘即可。thread-local
         # 里的旧 finalizer 留下无妨：它触发时按 token 找不到条目，空转。
         with self._server_lock:
-            self._client_threads.pop(threading.current_thread().ident, None)
-        try:
-            self._dll().CloseHandle(handle)
-        except Exception:
-            pass
+            entry = self._client_threads.pop(threading.current_thread().ident, None)
+        if entry is not None:
+            try:
+                self._dll().CloseHandle(entry[0])
+            except Exception:
+                pass
         self._client_local.handle = None
 
     # -- server side -------------------------------------------------------
@@ -419,6 +464,9 @@ class NamedPipeTransport(RpcTransport):
                 time.sleep(_CONNECT_POLL_SECONDS)
                 continue
             with self._server_lock:
+                if not self._running:
+                    dll.CloseHandle(handle)
+                    return
                 self._server_handles.append(handle)
             connected = dll.ConnectNamedPipe(handle, None)
             if not connected and self._last_error() != ERROR_PIPE_CONNECTED:
@@ -454,7 +502,7 @@ class NamedPipeTransport(RpcTransport):
         outbox = queue.Queue()
         try:
             while self._running:
-                while not outbox.empty():
+                while self._running and not outbox.empty():
                     self._write(handle, outbox.get())
                 try:
                     raw = self._read(handle)
@@ -473,12 +521,14 @@ class NamedPipeTransport(RpcTransport):
                 request["_pipe_handle"] = handle
                 request["_pipe_outbox"] = outbox
                 self.deliver(request)
+        except TransportError:
+            # A closed peer or stop() can cancel a blocked response write too.
+            return
         finally:
-            # Flush whatever is queued before closing: the reload reply is a
-            # deferred answer, and a stop() that swallows it is exactly the
-            # reload self-teardown defect.
+            # While still running, flush queued deferred replies. stop() owns
+            # cancellation/close, so do not start another write after it.
             try:
-                while not outbox.empty():
+                while self._running and not outbox.empty():
                     self._write(handle, outbox.get())
             except Exception:
                 pass
@@ -601,7 +651,19 @@ class NamedPipeTransport(RpcTransport):
             pass
 
     def stop(self):
-        self._running = False
+        with self._server_lock:
+            self._running = False
+            self._stopped.set()
+            pending = list(self._pending_io.items())
+        # Block new I/O and cancel existing client/server operations until they
+        # exit. Closing first can race native calls and OS handle reuse.
+        while any(not done.is_set() for _handle, done in pending):
+            with self._server_lock:
+                for handle, done in pending:
+                    if self._pending_io.get(handle) is done:
+                        self._cancel_read(handle)
+            for _handle, done in pending:
+                done.wait(0.01)
         with self._server_lock:
             server = list(self._server_handles)
             clients = [entry[0] for entry in self._client_threads.values()]
