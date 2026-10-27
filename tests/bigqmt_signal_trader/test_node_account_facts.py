@@ -36,7 +36,7 @@ class SyntheticQmt:
         if detail in ("DEAL", "TRADE"):
             return self.trades
         if detail == "POSITION":
-            return [Row(stock_code="600000.SH", volume=100, available=0, cost=10.0)] if self.trades else []
+            return [Row(stock_code="600000.SH", volume=100, available=0, yesterday_volume=100, cost=10.0)] if self.trades else []
         if detail == "ACCOUNT":
             return [Row(cash=99000.0 if self.trades else 100000.0,
                         total_asset=100000.0, frozen_cash=0.0)]
@@ -140,7 +140,9 @@ def test_environment_identity_matrix_zero_writes(environment, identity):
     expected = "live" if identity == "sim-account" and environment == "live" else None
     assert handlers.handle("ping")["account_environment"] == expected
     for method, params in [("order_stock", order()), ("order_stock_batch", {"orders": [order()]}),
-                           ("cancel_order_stock", {"order_id": "order-1"})]:
+                           ("cancel_order_stock", {"order_id": "order-1"}),
+                           ("passorder", {"op_type": 23, "order_code": "600000.SH", "volume": 100}),
+                           ("cancel_orders_batch", {"items": [{"order_sys_id": "order-1"}]})]:
         with pytest.raises(PermissionError):
             handlers.handle(method, params)
     assert qmt.writes == [] and handlers._submit_journal == {}
@@ -171,7 +173,10 @@ def test_conflicting_rpc_account_and_batch_override_zero_writes(params):
     handlers = make_handlers(qmt)
     for method, payload in [("submit_order", order(**params)),
                             ("cancel_order", dict(order_id="order-1", **params)),
-                            ("submit_orders_batch", {"orders": [order(), order(**params)]})]:
+                            ("submit_orders_batch", {"orders": [order(), order(**params)]}),
+                            ("passorder", dict(op_type=23, order_code="600000.SH", volume=100, **params)),
+                            ("cancel_orders_batch", {"items": [{"order_sys_id": "order-1"},
+                                                               dict(order_sys_id="order-2", **params)]})]:
         with pytest.raises(PermissionError):
             handlers.handle(method, payload)
     assert qmt.writes == []

@@ -5,8 +5,8 @@ def __getattr__(name):
     return getattr(_compat.xtdata, name)
 
 
-def get_full_tick(code_list):
-    return _compat.xtdata.get_full_tick(code_list)
+def get_full_tick(code_list, types=None):
+    return _compat.xtdata.get_full_tick(code_list, types=types)
 
 
 def get_market_data(field_list=[], stock_list=[], period="1d", start_time="", end_time="", count=-1, dividend_type="none", fill_data=True):
@@ -21,12 +21,19 @@ def get_local_data(field_list=[], stock_list=[], period="1d", start_time="", end
     return _compat.xtdata.get_local_data(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data, data_dir)
 
 
-def get_instrument_detail(stock_code):
+def get_instrument_detail(stock_code, is_detail=False):
+    # is_detail: 对齐原生 xtquant 双参签名; 桥接路径不区分详细/简要,
+    # 接收并忽略, 避免原生双参调用抛 TypeError。
     return _compat.xtdata.get_instrument_detail(stock_code)
 
 
 def get_instrumentdetail(stock_code):
     return _compat.xtdata.get_instrumentdetail(stock_code)
+
+
+def get_option_detail_data_batch(stockcodes, timeout_seconds=300.0):
+    return _compat.xtdata.get_option_detail_data_batch(
+        stockcodes, timeout_seconds=timeout_seconds)
 
 
 def get_instrument_type(stock_code, variety_list=None):
@@ -37,8 +44,28 @@ def get_stock_list_in_sector(sector_name, real_timetag=-1):
     return _compat.xtdata.get_stock_list_in_sector(sector_name, real_timetag=real_timetag)
 
 
-def get_sector_list():
-    return _compat.xtdata.get_sector_list()
+def get_sector_list(allow_fallback=False):
+    return _compat.xtdata.get_sector_list(allow_fallback=allow_fallback)
+
+
+def create_sector(sector_name, stock_list):
+    return _compat.xtdata.create_sector(sector_name, stock_list)
+
+
+def create_sector_folder(parent_node, folder_name, overwrite=False):
+    return _compat.xtdata.create_sector_folder(parent_node, folder_name, overwrite)
+
+
+def reset_sector_stock_list(sector, stock_list):
+    return _compat.xtdata.reset_sector_stock_list(sector, stock_list)
+
+
+def add_stock_to_sector(sector, stock_code):
+    return _compat.xtdata.add_stock_to_sector(sector, stock_code)
+
+
+def remove_stock_from_sector(sector, stock_code):
+    return _compat.xtdata.remove_stock_from_sector(sector, stock_code)
 
 
 def get_sector_info(sector_name=""):
@@ -73,16 +100,40 @@ def getDividFactors(*args, **kwargs):
     return _compat.xtdata.get_divid_factors(*args, **kwargs)
 
 
-def download_history_data(stock_code, period, start_time="", end_time="", incrementally=None):
-    return _compat.xtdata.download_history_data(stock_code, period, start_time, end_time, incrementally)
+def submit_download_history_data(stock_code, period, start_time="", end_time="", incrementally=None):
+    return _compat.xtdata.submit_download_history_data(stock_code, period, start_time, end_time, incrementally)
 
 
-def download_history_data2(stock_list, period, start_time="", end_time="", callback=None, incrementally=None):
-    return _compat.xtdata.download_history_data2(stock_list, period, start_time, end_time, callback, incrementally)
+def submit_download_history_data2(stock_list, period, start_time="", end_time="", incrementally=None):
+    return _compat.xtdata.submit_download_history_data2(stock_list, period, start_time, end_time, incrementally)
+
+
+def get_download_status(job_id):
+    return _compat.xtdata.get_download_status(job_id)
+
+
+def wait_download(job_id, timeout=None, poll_interval=None, callback=None):
+    return _compat.xtdata.wait_download(job_id, timeout, poll_interval, callback)
+
+
+def download_history_data(stock_code, period, start_time="", end_time="", incrementally=None, dividend_type="none"):
+    # dividend_type 必须与随后的 get_local_data 一致, 否则复权缓存不命中。
+    return _compat.xtdata.download_history_data(stock_code, period, start_time, end_time, incrementally, dividend_type)
+
+
+def download_history_data2(stock_list, period, start_time="", end_time="", callback=None, incrementally=None, dividend_type="none"):
+    return _compat.xtdata.download_history_data2(stock_list, period, start_time, end_time, callback, incrementally, dividend_type)
 
 
 def get_trading_dates(market, start_time="", end_time="", count=-1):
     return _compat.xtdata.get_trading_dates(market, start_time, end_time, count)
+
+
+def get_stock_type(stock):
+    # 走包装而不是 call_method：包装里写了为什么这个方法在大 QMT 上答不了
+    # （ContextInfo stub 对任何代码都返回 0）。两条路径必须一致，否则
+    # 顶层 xtdata 还会把那个 0 递给调用方。
+    return _compat.xtdata.get_stock_type(stock)
 
 
 def get_holidays():

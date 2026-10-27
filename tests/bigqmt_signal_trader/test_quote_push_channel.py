@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -125,8 +126,175 @@ class ZmqPushChannelTest(unittest.TestCase):
         self.assertEqual(topic, "SH,SZ")
         self.assertEqual(data["000001.SZ"]["lastPrice"], 10.5)
 
+    def test_stop_from_foreign_thread_while_sub_active_does_not_crash(self):
+        """Regression: stop() used to close the SUB socket from the calling
+        thread while the sub thread was still polling it -> Windows ZMQ
+        signaler abort -> QMT process crash ("auto-exit"). The sub thread must
+        close its own socket; repeated stop/start (topic changes) must be safe."""
+        zmq = __import__("zmq")
+        ctx = zmq.Context.instance()
+        pub_addr = "inproc://quote-push-stop-%d" % id(self)
+
+        server = ZmqQuotePushChannel(bind_address=pub_addr, context=ctx)
+        server.start_publisher()
+        client = ZmqQuotePushChannel(connect_address=pub_addr, context=ctx)
+        try:
+            for i in range(5):
+                # Simulate _sync_subscriber_locked topic changes: start a
+                # subscriber, immediately stop it from this (foreign) thread.
+                client.start_subscriber(["T%d" % i], lambda t, d: None)
+                time.sleep(0.05)
+                client.stop()  # must not raise / abort
+        finally:
+            client.stop()
+            server.stop()
+        # Reaching here without an abort/crash is the assertion.
+        self.assertTrue(True)
+
+
+class ZmqSubscriberLeakTest(unittest.TestCase):
+    """#403: a subscriber whose join times out must still die.
+
+    Pre-fix, _sub_loop keyed on the shared self._running: stop() set it
+    False, the next start_subscriber() set it back True, and a thread whose
+    join timed out (blocked inside on_msg) saw True again and lived forever
+    on its OLD cumulative topic set. WholeQuoteClientSession re-subscribes
+    on every topic-set change, so N batches left up to N-1 zombies and early
+    chunks arrived once per zombie (measured 1.7x-7x, stair-stepped).
+
+    Now every subscriber captures its own Event; a join timeout means "still
+    in its callback", not "leaked" -- the set Event kills it the moment the
+    callback returns.
+    """
+
+    def test_resubscribe_does_not_duplicate_after_slow_callback(self):
+        zmq = __import__("zmq")
+        ctx = zmq.Context.instance()
+        pub_addr = "inproc://quote-push-leak-%d" % id(self)
+
+        server = ZmqQuotePushChannel(bind_address=pub_addr, context=ctx)
+        server.start_publisher()
+        client = ZmqQuotePushChannel(connect_address=pub_addr, context=ctx)
+
+        block = threading.Event()        # holds the first callback hostage
+        first_entered = threading.Event()
+        first_calls = []
+        second_calls = []
+
+        def slow_first(topic, data):
+            first_entered.set()
+            block.wait(3.0)              # stays inside on_msg past the join
+            first_calls.append((topic, data))
+
+        if hasattr(client, "subscriber_join_seconds"):
+            client.subscriber_join_seconds = 0.2
+        client.start_subscriber(["A"], slow_first)
+        try:
+            time.sleep(0.2)              # let the SUB filter propagate
+            server.publish("A", {"n": 1})
+            self.assertTrue(first_entered.wait(2.0), "first subscriber never fired")
+
+            # The session's pattern: the topic set changed, stop + start.
+            # The old thread is still inside slow_first, so the join times
+            # out here -- pre-fix it was abandoned and then revived by
+            # start's shared-flag True.
+            client.stop()
+            client.start_subscriber(["A", "B"],
+                                    lambda t, d: second_calls.append((t, d)))
+            time.sleep(0.2)
+
+            self.assertEqual(first_calls, [], "zombie callback still blocked?")
+            block.set()                  # the zombie's callback returns now
+
+            # Post-fix the zombie's own Event was set by _stop_subscriber:
+            # it exits and closes its socket. Pre-fix it loops back into
+            # poll() and keeps receiving topic A forever.
+            active = getattr(client, "active_subscribers", None)
+            if active is not None:
+                deadline = time.time() + 3.0
+                while time.time() < deadline and active() > 1:
+                    time.sleep(0.05)
+                self.assertEqual(active(), 1,
+                                 "the superseded subscriber did not exit")
+
+            server.publish("A", {"n": 3})
+            time.sleep(0.4)
+            self.assertEqual([d["n"] for _, d in second_calls if d.get("n") == 3], [3],
+                             "msg 3 must arrive exactly once on the live subscriber")
+            self.assertEqual([d for _, d in first_calls if d.get("n") == 3], [],
+                             "the zombie must not receive after its stop event was set")
+        finally:
+            block.set()
+            client.stop()
+            server.stop()
+
+    def test_active_subscribers_is_zero_or_one_in_health(self):
+        zmq = __import__("zmq")
+        ctx = zmq.Context.instance()
+        pub_addr = "inproc://quote-push-active-%d" % id(self)
+
+        server = ZmqQuotePushChannel(bind_address=pub_addr, context=ctx)
+        server.start_publisher()
+        client = ZmqQuotePushChannel(connect_address=pub_addr, context=ctx)
+        try:
+            self.assertEqual(client.active_subscribers(), 0)
+            client.start_subscriber(["A"], lambda t, d: None)
+            time.sleep(0.1)
+            self.assertEqual(client.active_subscribers(), 1)
+            client.stop()
+            self.assertEqual(client.active_subscribers(), 0)
+        finally:
+            client.stop()
+            server.stop()
+
 
 class RedisPushChannelTest(unittest.TestCase):
+    def test_connection_failures_reconnect_and_deliver_without_changing_topics(self):
+        for stage in ("pubsub", "subscribe", "get_message"):
+            with self.subTest(stage=stage):
+                redis_client = FakeRedis()
+                failed = FakePubSub(redis_client)
+                replacement = FakePubSub(redis_client)
+                if stage != "pubsub":
+                    setattr(failed, stage, mock.Mock(side_effect=ConnectionError("offline failure")))
+                redis_client.pubsub = mock.Mock(side_effect=[
+                    ConnectionError("offline failure") if stage == "pubsub" else failed, replacement])
+                client = RedisQuotePushChannel(redis_client, account_id="acct")
+                received, done = [], threading.Event()
+
+                def callback(topic, data):
+                    received.append((topic, data))
+                    done.set()
+
+                redis_client.publish(client._channel("SH"), encode_push_payload({"data": {"x": 1}}))
+                client.start_subscriber(["SH"], callback)
+                try:
+                    self.assertTrue(done.wait(3.0), "connection recovered but callbacks did not")
+                    self.assertEqual(redis_client.pubsub.call_count, 2)
+                    self.assertEqual(received, [("SH", {"x": 1})])
+                    if stage != "pubsub":
+                        self.assertTrue(failed._closed)
+                finally:
+                    client.stop()
+                self.assertTrue(replacement._closed)
+
+    def test_stop_during_reconnect_backoff_does_not_open_another_connection(self):
+        redis_client = FakeRedis()
+        failed = FakePubSub(redis_client)
+        failed.get_message = mock.Mock(side_effect=ConnectionError("offline failure"))
+        closed = threading.Event()
+        failed.close = closed.set
+        redis_client.pubsub = mock.Mock(return_value=failed)
+        client = RedisQuotePushChannel(redis_client)
+        client.start_subscriber(["SH"], lambda *_: None)
+        thread = client._thread
+        try:
+            self.assertTrue(closed.wait(2.0))
+        finally:
+            client.stop()
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(redis_client.pubsub.call_count, 1)
+
     def test_pub_sub_roundtrip(self):
         redis_client = FakeRedis()
         server = RedisQuotePushChannel(redis_client, account_id="acct")

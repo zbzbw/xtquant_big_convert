@@ -11,6 +11,7 @@ subscription does not by itself deliver an initial full snapshot — callers lay
 a ``get_full_tick`` prime on top (done in ``BigQmtXtData.subscribe_whole_quote``).
 """
 
+import os
 import threading
 
 
@@ -42,6 +43,7 @@ class WholeQuoteClientSession(object):
         self._subscribed_topics = frozenset()  # topic set the subscriber covers now
         self._heartbeat_thread = None
         self._last_push_time = None  # monotonic time of last incoming push
+        self._replay_pending = False  # a failed batch must finish despite other subscriptions pushing
 
     # -- subscription lifecycle ---------------------------------------------
     def subscribe_whole_quote(self, code_list, callback=None):
@@ -72,6 +74,40 @@ class WholeQuoteClientSession(object):
                 self._sync_subscriber_locked()
         return 0
 
+    def unsubscribe_quotes(self, sub_ids):
+        """Release many handles in ONE RPC and ONE topic re-sync (#418).
+
+        Per-handle release costs an RPC plus a subscriber rebuild each
+        (N items -> N RPCs and N-1 rebuilds); a caller exiting with 26
+        handles waited seconds. The server releases only THIS client's named
+        references -- shared combos stay up for their other subscribers, and
+        quote_unsubscribe_all stays the last resort it was. The report names
+        unknown ids and native unsubscribe errors instead of swallowing them.
+        """
+        wanted = [s for s in (sub_ids or [])]
+        with self._lock:
+            for sub_id in wanted:
+                self._subscriptions.pop(sub_id, None)
+        if not wanted:
+            return {"released": [], "unknown": [], "native_errors": []}
+        try:
+            report = self._rpc("unsubscribe_whole_quote_batch",
+                               {"client_id": self.client_id,
+                                "sub_ids": [str(s) for s in wanted]})
+        finally:
+            with self._lock:
+                self._sync_subscriber_locked()
+        if not isinstance(report, dict):
+            # #427: the RPC went out and came back with nothing usable. An
+            # empty report here would read as "nothing to release" while the
+            # server-side state is actually unknown -- fail loud instead.
+            raise RuntimeError(
+                "unsubscribe_whole_quote_batch returned %r: the server gave "
+                "no release report for %d handle(s); their server-side state "
+                "is unknown -- verify with quote_subscription_status "
+                "before assuming they are released" % (report, len(wanted)))
+        return report
+
     def has_subscription(self, sub_id):
         with self._lock:
             return sub_id in self._subscriptions
@@ -81,17 +117,51 @@ class WholeQuoteClientSession(object):
         Idempotent on the server (keyed by client_id+combo), so replays are safe."""
         with self._lock:
             items = [(sid, dict(entry)) for sid, entry in self._subscriptions.items()]
+            self._replay_pending = True
+        error = None
         for sub_id, entry in items:
-            self._rpc(
-                "subscribe_whole_quote",
-                {"client_id": self.client_id, "sub_id": sub_id, "codes": entry["codes"]},
-            )
+            with self._lock:
+                # A batch unsubscribe that interleaved since the snapshot owns
+                # this sub_id now -- re-subscribing it would resurrect a handle
+                # the caller just released (#418).
+                if sub_id not in self._subscriptions:
+                    continue
+            try:
+                self._rpc(
+                    "subscribe_whole_quote",
+                    {"client_id": self.client_id, "sub_id": sub_id, "codes": entry["codes"]},
+                )
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            # #428: the membership check above and the RPC are not one
+            # critical section (holding the lock across an RPC would stall
+            # every unsubscribe behind it), so a release can land between
+            # them. Re-check after the RPC: a handle released in that window
+            # is on the server again -- undo it immediately rather than leave
+            # it for the reaper's heartbeat timeout.
+            with self._lock:
+                still_mine = sub_id in self._subscriptions
+            if not still_mine:
+                try:
+                    self._rpc("unsubscribe_whole_quote",
+                              {"client_id": self.client_id, "sub_id": sub_id})
+                except Exception:
+                    pass
+        if error is not None:
+            raise error
+        with self._lock:
+            self._replay_pending = False
 
     # -- heartbeat -------------------------------------------------------------
     def start(self):
         with self._lock:
-            if self._started:
+            thread = self._heartbeat_thread
+            if self._started and thread is not None and thread.is_alive():
                 return
+            # A past replay exception may have killed the loop while _started
+            # stayed True (#231) -- "started" must mean "a live thread",
+            # otherwise start() never recovers it.
             self._started = True
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat_loop, name="bigqmt-quote-keepalive", daemon=True
@@ -127,14 +197,9 @@ class WholeQuoteClientSession(object):
                     self._rpc("quote_keepalive", {"client_id": self.client_id, "sub_id": sub_id})
                 except Exception:
                     failures += 1
+            recovered = not failures and consecutive_failures >= 3
             if failures:
                 consecutive_failures += 1
-            elif consecutive_failures >= 3:
-                # Server is back after a restart window: replay subscriptions so
-                # the restarted server re-creates the big-QMT subscriptions (its
-                # state is gone). Idempotent on the server, so replays are safe.
-                self.replay_subscriptions()
-                consecutive_failures = 0
             else:
                 consecutive_failures = 0
             # Push-silence detection: a server restart can survive with keepalive
@@ -147,8 +212,15 @@ class WholeQuoteClientSession(object):
             else:
                 silence_rounds += 1
             prev_last_push = last_push
-            if silence_rounds >= self._push_silence_replay_heartbeats:
-                self.replay_subscriptions()
+            with self._lock:
+                replay_pending = self._replay_pending
+            if recovered or replay_pending or silence_rounds >= self._push_silence_replay_heartbeats:
+                # Retry the idempotent batch until every subscription succeeds.
+                # A's pushes cannot erase B's unresolved replay (#231).
+                try:
+                    self.replay_subscriptions()
+                except Exception:
+                    pass
                 silence_rounds = 0
             time.sleep(self._heartbeat_interval)
 
@@ -197,8 +269,20 @@ class WholeQuoteClientSession(object):
         self._subscriber_active = True
         self._subscribed_topics = active
 
+    # sub_ids carry the process id. The server keys a subscription by
+    # (client_id, sub_id), and client_id is by default one persisted file per
+    # user (~/.cache/bigqmt/quote_client_id) -- so two client processes on
+    # one machine shared it, both minted sub_id 1, 2, ..., and the server saw
+    # ONE subscriber: process B's unsubscribe / heartbeat lapse tore down
+    # process A's subscription. Folding the pid in keeps the ids distinct
+    # across processes while staying an int, which is what MiniQMT returns
+    # and what callers hand back to unsubscribe_quote. A restarted process
+    # gets fresh ids; its old ones lapse with the heartbeat, and the shared
+    # QMT-side subscription (refcounted per combo) never drops in between.
+    SUB_ID_PID_STRIDE = 1000000
+
     def _next_sub_id(self):
         if self._sub_id_func is not None:
             return self._sub_id_func()
         self._seq += 1
-        return self._seq
+        return os.getpid() * self.SUB_ID_PID_STRIDE + self._seq
