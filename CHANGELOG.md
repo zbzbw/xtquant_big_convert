@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.3.75+bwt.4] - 2026-10-27
+
+- Pipe service startup logs report transport, background-thread mode and active
+  heavy worker state without account IDs, pipe paths or Redis channel/queue names.
+  This applies to both background and adjust-drain operation.
+
 ## [0.3.75+bwt.3] - 2026-10-27
 
 - Cover Named Pipe connection waits, blocking request writes and response reads
