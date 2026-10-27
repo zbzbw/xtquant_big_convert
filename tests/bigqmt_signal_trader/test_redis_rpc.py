@@ -1037,15 +1037,24 @@ class RedisRpcTest(unittest.TestCase):
             ("query_trades", "DEAL"), ("query_stock_trades", "DEAL"),
             ("query_execution_snapshot", "ORDER"), ("query_execution_snapshot", "DEAL"),
         )
-        for method, failed_type in cases:
-            with self.subTest(method=method, failed_type=failed_type):
+        failure_modes = ("query_error", "invalid_rows", "mixed_rows")
+        for method, failed_type, failure_mode in (
+                (method, detail, mode) for method, detail in cases for mode in failure_modes):
+            with self.subTest(method=method, failed_type=failed_type, failure_mode=failure_mode):
                 calls = []
 
                 def query(account_id, account_type, detail_type, *args):
                     self.assertEqual((account_id, account_type), ("acct", "STOCK"))
                     calls.append(detail_type)
                     if detail_type == failed_type:
-                        raise RuntimeError("simulated native %s query failure" % failed_type)
+                        if failure_mode == "query_error":
+                            raise RuntimeError("simulated native %s query failure" % failed_type)
+                        from types import SimpleNamespace
+                        bad = SimpleNamespace(stock_code="???", volume=100,
+                                              available=100, yesterday_volume=100)
+                        good = SimpleNamespace(stock_code="600000.SH", volume=100,
+                                               available=100, yesterday_volume=100)
+                        return [bad] if failure_mode == "invalid_rows" else [good, bad]
                     return []
 
                 redis_client, service = _service()
@@ -1062,8 +1071,10 @@ class RedisRpcTest(unittest.TestCase):
                 response = json.loads(redis_client.kv["bigqmt:rpc:resp:acct:" + method])
                 self.assertFalse(response["ok"])
                 self.assertIsNone(response["data"])
-                self.assertEqual(response["error"],
-                                 "RuntimeError: simulated native %s query failure" % failed_type)
+                expected_error = (
+                    "RuntimeError: simulated native %s query failure" % failed_type
+                    if failure_mode == "query_error" else "ValueError: invalid stock code: ???")
+                self.assertEqual(response["error"], expected_error)
                 expected_calls = (["ORDER", "DEAL"]
                                   if method == "query_execution_snapshot" and failed_type == "DEAL"
                                   else [failed_type])

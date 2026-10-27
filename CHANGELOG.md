@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.3.75+bwt.2] - 2026-10-27
+
+- Propagate native POSITION/ORDER/DEAL row parsing failures through the existing
+  RPC error path, including mixed valid/invalid rows and strict identity queries.
+- Keep real empty queries successful. Required duplicate checks refuse native
+  writes when an order or trade row cannot be parsed.
+
 ## [0.3.75+bwt.1] - 2026-10-27
 
 - Sync upstream main through 0.3.75; retain BWT cursor recording and verified

@@ -40,7 +40,7 @@ from ..account_type_map import account_type_for
 from ..code_utils import normalize_stock_code
 from ..exec_events import date_time_seconds
 from ..models import CancelResult, OrderSnapshot, OrderSubmitResult, SignalAction, TradeSnapshot
-from .position_bigqmt import _attr, _full_code, skip_unparsable_row
+from .position_bigqmt import _attr, _full_code
 
 
 # Cap on the masked shape reported by describe_detail_fields (issue #154):
@@ -714,14 +714,10 @@ class BigQmtOrderGateway:
         account_type_code = self._account_type_code(account_id)
         name_cache = {}
         for row in rows:
-            try:
-                stock_code = _full_code(
-                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
-                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
-                )
-            except Exception as exc:
-                skip_unparsable_row("ORDER", row, exc)
-                continue
+            stock_code = _full_code(
+                _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+            )
             result.append(
                 OrderSnapshot(
                     order_sys_id=str(_attr(row, ("m_strOrderSysID", "order_sys_id"), "") or ""),
@@ -809,14 +805,10 @@ class BigQmtOrderGateway:
         name_cache = {}
         for row in rows:
             traded_at_raw = _attr(row, ("m_strTradeTime", "trade_time", "traded_at"), "")
-            try:
-                stock_code = _full_code(
-                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
-                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
-                )
-            except Exception as exc:
-                skip_unparsable_row("DEAL", row, exc)
-                continue
+            stock_code = _full_code(
+                _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+            )
             result.append(
                 TradeSnapshot(
                     trade_id=str(_attr(row, ("m_strTradeID", "trade_id"), "") or ""),

@@ -225,6 +225,29 @@ def test_batch_rechecks_session_after_identity_query_before_write():
     assert qmt.writes == [] and handlers._submit_journal == {}
 
 
+@pytest.mark.parametrize("failed_detail", ["ORDER", "DEAL"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_batch_refuses_native_write_when_identity_rows_cannot_be_parsed(failed_detail, mixed):
+    qmt = SyntheticQmt()
+    bad = Row(stock_code="???", volume=100, available=100, yesterday_volume=100,
+              order_sys_id="existing-order", user_order_id="tag-1", trade_id="trade-1")
+    good = Row(stock_code="600000.SH", volume=100, available=100, yesterday_volume=100,
+               order_sys_id="other-order", user_order_id="other-tag", trade_id="trade-2")
+    qmt.query = lambda account, account_type, detail, strategy="": (
+        ([good, bad] if mixed else [bad]) if detail == failed_detail else [])
+    handlers = make_handlers(qmt)
+    service = RedisPubSubRpcService(MemoryRedis(), handlers, account_id="sim-account")
+
+    response = service.process_request({"method": "submit_orders_batch", "params": {
+        "orders": [order(require_idempotency_check=True)]}})
+
+    assert response["ok"]
+    result, = response["data"]
+    assert result["accepted"] is False
+    assert result["error"] == "IDEMPOTENCY_CHECK_UNAVAILABLE"
+    assert qmt.writes == [] and handlers._submit_journal == {}
+
+
 def test_binding_is_copied_and_ping_does_not_authorize_future_cancel():
     qmt = SyntheticQmt()
     binding = {"account_id": "sim-account", "account_environment": "live", "session_id": "session-1"}

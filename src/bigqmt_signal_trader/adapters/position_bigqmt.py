@@ -137,14 +137,8 @@ def _full_code(instrument_id, exchange_id):
     return normalize_stock_code(raw)
 
 
-# One unparsable row must not cost the whole query. _full_code raises on a
-# structure it does not recognise (a counter-style futures exchange ID, a
-# malformed bare code), and every caller loops over rows without per-row
-# protection -- so without this, a single odd row turns "one position missing"
-# into "no positions at all", which for a trading system is far worse.
-#
-# Reported once per (kind, exchange) so a persistently odd row does not flood
-# the QMT panel, while still naming what to look at.
+# Diagnostic for skipped POSITION_STATISTICS rows. Business position, order
+# and trade queries propagate row parsing failures to the RPC error path.
 _unparsable_rows_reported = set()
 
 
@@ -193,14 +187,10 @@ class BigQmtPositionProvider:
         rows = query(account_id, self._resolve_account_type(account_id), "POSITION") or []
         positions = []
         for row in rows:
-            try:
-                code = _full_code(
-                    _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
-                    _attr(row, ("m_strExchangeID", "exchange_id", "market")),
-                )
-            except Exception as exc:
-                skip_unparsable_row("POSITION", row, exc)
-                continue
+            code = _full_code(
+                _attr(row, ("m_strInstrumentID", "instrument_id", "stock_code")),
+                _attr(row, ("m_strExchangeID", "exchange_id", "market")),
+            )
             positions.append(PositionSnapshot(
                 stock_code=code,
                 volume=_required_count(row, ("m_nVolume", "volume"), "volume", code, account_id),
